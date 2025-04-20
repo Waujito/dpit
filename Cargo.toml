@@ -1,0 +1,24 @@
+[package]
+name = "ebpf_dpit"
+version = "0.1.0"
+edition = "2024"
+license = "GPLv3"
+
+[build-dependencies]
+libbpf-cargo = "0.24.8"
+cargo-emit = "0.2.1"
+vmlinux = { git = "https://github.com/libbpf/vmlinux.h.git" }
+
+[dependencies]
+anyhow = "1.0"
+libbpf-rs = "0.24.8"
+libc = "0.2"
+nix = { version = "0.28", default-features = false, features = ["net", "user"] }
+clap = { version = "4.0.32", default-features = false, features = ["std", "derive", "help", "usage"] }
+tokio = { version = "1.44.2", features = [
+	"macros",
+	"rt",
+	"rt-multi-thread",
+	"net",
+	"signal"
+] }
