@@ -28,7 +28,7 @@
 #define TC_ACT_UNSPEC	(-1)
 #define TC_ACT_SHOT	2
 
-#define CT_SEQ_WINSIZE 3500
+#define CT_SEQ_WINSIZE 5000
 
 struct ip_entry {
 	union {

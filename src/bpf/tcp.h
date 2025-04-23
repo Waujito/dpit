@@ -20,7 +20,6 @@
 #define TCP_H
 
 #include "types.h"
-const char uwu[] SEC(".rodata") = "uwu %d";
 
 static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset);
 
@@ -43,31 +42,27 @@ struct {
 
 static const u32 CTVS_KEY = 0;
 
-static __inline int copy_ctvs_with_offset(struct ct_value *src, 
-					  struct ct_value *dst,
-					  u32 src_off,
-					  u32 dst_off,
-					  u32 len
-) {
+struct cbl_cts {
+	struct ct_value *src;
+	struct ct_value *dst;
+	u32 src_off;
+	u32 dst_off;
+	u32 len;
+};
+
+static long copy_ctvs_with_offset_callback(u64 index, void *ctx) {
+	struct cbl_cts *cbtx = ctx;	
+	if (index >= cbtx->len) {
+		return 1;
+	}
+
 	int ret;
 
 	asm volatile(
-		"if %[src_off] > %[ct_ws] goto .cp_errex_%=\n\t"
-		"if %[dst_off] > %[ct_ws] goto .cp_errex_%=\n\t"
-		"if %[len] > %[ct_ws] goto .cp_errex_%=\n\t"
 		"r5 = %[src_off]\n\t"
-		"r5 += %[len]\n\t"
-		"if r5 > %[ct_ws] goto .cp_errex_%=\n\t"
-		"r5 = %[dst_off]\n\t"
-		"r5 += %[len]\n\t"
-		"if r5 > %[ct_ws] goto .cp_errex_%=\n\t"
-		"r1 = 0\n\t"
-		".loop_rst_%=:\n\t"
-		"if r1 >= %[len] goto .ct_sucex_%=\n\t"
-		"r5 = %[src_off]\n\t"
-		"r5 += r1\n\t"
+		"r5 += %[idx]\n\t"
 		"r6 = %[dst_off]\n\t"
-		"r6 += r1\n\t"
+		"r6 += %[idx]\n\t"
 		"if r5 >= %[ct_ws] goto .cp_errex_%=\n\t"
 		"if r6 >= %[ct_ws] goto .cp_errex_%=\n\t"
 		"r2 = %[sbuf]\n\t"
@@ -76,27 +71,138 @@ static __inline int copy_ctvs_with_offset(struct ct_value *src,
 		"r2 = %[dbuf]\n\t"
 		"r2 += r6\n\t"
 		"*(u8 *)(r2 + 0) = r3\n\t"
-		"r1 += 1\n\t"
-		"goto .loop_rst_%=\n\t"
-		".ct_sucex_%=:\n\t"
 		"%[ret] = 0\n\t"
 		"goto +1\n\t"
 		".cp_errex_%=:\n\t"
-		"%[ret] = -1\n\t"
+		"%[ret] = 1\n\t"
 		: [ret]"=r"(ret)
 		:	[ct_ws]"i"(CT_SEQ_WINSIZE), 
-			[src_off]"r"(src_off),
-			[dst_off]"r"(dst_off),
-			[len]"r"(len),
-			[dbuf]"r"(dst->buf),
-			[sbuf]"r"(src->buf)
-		: "r1", "r2", "r3", "r5", "r6"
+			[src_off]"r"(cbtx->src_off),
+			[dst_off]"r"(cbtx->dst_off),
+			[len]"r"(cbtx->len),
+			[dbuf]"r"(cbtx->dst->buf),
+			[sbuf]"r"(cbtx->src->buf),
+			[idx]"r"((u32)index)
+		: "r2", "r3", "r5", "r6"
 	);
 
-	bpf_printk("ret %d", ret);
+	if (ret == 1) {
+		bpf_printk("Return in ctvs");
+	}
+
 
 	return ret;
 }
+
+static __inline int copy_ctvs_with_offset(struct ct_value *src, 
+					  struct ct_value *dst,
+					  u32 src_off,
+					  u32 dst_off,
+					  u32 len
+) {
+	int ret;
+
+	struct cbl_cts cbts = {
+		.src = src,
+		.dst = dst,
+		.src_off = src_off,
+		.dst_off = dst_off,
+		.len = len
+	};
+
+	ret = bpf_loop(CT_SEQ_WINSIZE, copy_ctvs_with_offset_callback, &cbts, 0);
+
+	bpf_printk("ret %d", ret);
+
+	return -(ret >= 0);
+}
+
+struct xdpbfs_cts {
+	struct xdp_md *ctx;
+	struct ct_value *dst;
+	u32 src_off;
+	u32 dst_off;
+	u32 len;
+};
+
+static long copy_xdpbfs_with_offset_callback(u64 index, void *ctx) {
+	struct xdpbfs_cts *cbtx = ctx;	
+	if (index >= cbtx->len) {
+		return 1;
+	}
+
+	u64 dstart = cbtx->ctx->data;
+	u64 dend = cbtx->ctx->data_end;
+	u32 doff = cbtx->src_off;
+	if (doff > 0x0fff) {
+		return 1;
+	}
+
+	dstart += doff;
+	if (dstart > dend) {
+		return 1;
+	}
+
+	int ret;
+
+	asm volatile(
+		"r5 = %[dstart]\n\t"
+		"r5 += %[idx]\n\t"
+		"r3 = r5\n\t"
+		"r3 += 1\n\t"
+		"r6 = %[dst_off]\n\t"
+		"r6 += %[idx]\n\t"
+		"if r3 > %[dend] goto .cp_errex_%=\n\t"
+		"if r6 >= %[ct_ws] goto .cp_errex_%=\n\t"
+		"r3 = *(u8 *)(r5 + 0)\n\t"
+		"r2 = %[dbuf]\n\t"
+		"r2 += r6\n\t"
+		"*(u8 *)(r2 + 0) = r3\n\t"
+		"%[ret] = 0\n\t"
+		"goto +1\n\t"
+		".cp_errex_%=:\n\t"
+		"%[ret] = 1\n\t"
+		: [ret]"=r"(ret)
+		:	[ct_ws]"i"(CT_SEQ_WINSIZE), 
+			[dstart]"r"(dstart),
+			[dend]"r"(dend),
+			[dst_off]"r"(cbtx->dst_off),
+			[len]"r"(cbtx->len),
+			[dbuf]"r"(cbtx->dst->buf),
+			[idx]"r"((u32)index)
+		: "r2", "r3", "r5", "r6"
+	);
+
+	if (ret == 1) {
+		bpf_printk("Error in xdcpy");
+	}
+
+	return ret;
+}
+
+static __inline int copy_xdpbfs_with_offset(struct xdp_md *ctx, 
+					  struct ct_value *dst,
+					  u32 src_off,
+					  u32 dst_off,
+					  u32 len
+) {
+	int ret;
+
+	struct xdpbfs_cts cbts = {
+		.ctx = ctx,
+		.dst = dst,
+		.src_off = src_off,
+		.dst_off = dst_off,
+		.len = len
+	};
+
+	ret = bpf_loop(CT_SEQ_WINSIZE, copy_xdpbfs_with_offset_callback, &cbts, 0);
+
+	bpf_printk("ret %d", ret);
+
+	return -(ret >= 0);
+}
+
 
 static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 {	
@@ -198,13 +304,14 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 
 			copy_ctvs_with_offset(ctvb, ctv, 0, seq_offset, copy_len);
 		} else {
-			u8 *dstart = (void *)pktd->pkt.xdp->data;
-			u8 *dend = (void *)pktd->pkt.xdp->data_end;
-			if (pktd->ltd.payload_offset > 0xffff) {
+			u64 dstart = pktd->pkt.xdp->data;
+			u64 dend = pktd->pkt.xdp->data_end;
+			u32 doff = pktd->ltd.payload_offset;
+			if (doff > 0x0fff) {
 				return PKT_ACT_CONTINUE;
 			}
 
-			dstart += pktd->ltd.payload_offset;
+			dstart += doff;
 			if (dstart > dend) {
 				return PKT_ACT_CONTINUE;
 			}
@@ -215,15 +322,13 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 				copy_len = lbuf_len;
 			}
 
-			u16 ofmax = seq_offset + copy_len;
-			if (ofmax > CT_SEQ_WINSIZE) {
-				ofmax = CT_SEQ_WINSIZE;
-			}
-
-			// u16 boff = 0;
-			// for (; dstart + boff + sizeof(u8) <= dend && boff <= CT_SEQ_WINSIZE && seq_offset + boff < CT_SEQ_WINSIZE && seq_offset + boff < copy_len; boff++) {
-			// 	ctv->buf[seq_offset + boff] = dstart[boff];
-			// }
+			ret = copy_xdpbfs_with_offset(
+				pktd->pkt.xdp,
+				ctv,
+				pktd->ltd.payload_offset,
+				seq_offset,
+				copy_len
+			);
 		}
 
 		struct pkt pkt = {
