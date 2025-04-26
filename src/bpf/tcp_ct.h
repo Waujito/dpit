@@ -39,8 +39,6 @@ struct {
         __uint(max_entries, 1);
 } ct_value_storage SEC(".maps");
 
-static const u32 CTVS_KEY = 0;
-
 struct cbl_cts {
 	struct ct_value *src;
 	struct ct_value *dst;
@@ -232,7 +230,7 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 
 	if (pktd->ltd.tcph.syn) {
 		struct ct_value *ctv;
-		ctv = bpf_map_lookup_elem(&ct_value_storage, &CTVS_KEY);
+		ctv = bpf_map_lookup_elem(&ct_value_storage, &PCP_KEY);
 		if (ctv == NULL) {
 			// should be unreachable
 			bpf_printk("FATAL: Cannot get value storage");
@@ -287,7 +285,7 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 				return PKT_ACT_CONTINUE;
 			}
 
-			ctvb = bpf_map_lookup_elem(&ct_value_storage, &CTVS_KEY);
+			ctvb = bpf_map_lookup_elem(&ct_value_storage, &PCP_KEY);
 			if (ctvb == NULL) {
 				// should be unreachable
 				bpf_printk("FATAL: Cannot get value storage");

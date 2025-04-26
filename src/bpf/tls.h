@@ -148,6 +148,17 @@ static __inline struct sni_tls_anres analyze_tls_chlo(struct pkt pkt, u64 offset
 	return res;
 }
 
+#define SNI_BUF_LEN 128
+/**
+ * Memory storage allocated for sni buffer
+ */
+struct {
+        __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+        __type(key, u32);
+        __type(value, char[SNI_BUF_LEN]);
+        __uint(max_entries, 1);
+} sni_buf_map SEC(".maps");
+
 static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u64 offset) {
 	int ret;
 	struct sni_tls_anres res = {
@@ -200,13 +211,39 @@ static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u64 offs
 
 	return res;
 }
+
 static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 	int ret;
 
 	struct sni_tls_anres chres = analyze_tls_record(pkt, offset);
 	if (chres.type == SNI_FOUND) {
 		bpf_printk("Found SNI in TLS in off %d and len %d", chres.sni_offset, chres.sni_length);
-		// chres.sni_offset, chres.sni_length;
+		u32 sni_length = chres.sni_length;
+		u32 sni_offset = chres.sni_offset;
+		char *sni_buf;
+
+		sni_buf = bpf_map_lookup_elem(&sni_buf_map, &PCP_KEY);
+		if (sni_buf == NULL) {
+			// should be unreachable
+			bpf_printk("FATAL: Cannot get value storage");
+			return PKT_ACT_CONTINUE;
+		}
+		// one for NULL-terminator
+		if (sni_length > SNI_BUF_LEN - 1) {
+			bpf_printk("SNI is too large");
+			return PKT_ACT_CONTINUE;
+		}
+		for (int i = 0; i < sni_length; i++) {
+			ret = pkt_read_u8(pkt, sni_offset + i, (u8 *)sni_buf + i);
+
+			if (ret) {
+				bpf_printk("sni copy error");
+				return PKT_ACT_CONTINUE;
+			}
+		}
+		sni_buf[sni_length] = '\0';
+
+		bpf_printk("SNI %s", sni_buf);
 	} else if (chres.type == SNI_NOT_FOUND) {
 		bpf_printk("SNI extension not found");
 	} else if (chres.type == TLS_NOT_MAPPED) {
@@ -215,7 +252,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 		bpf_printk("Mem error");
 	}
 
-	return PKT_ACT_PASS;
+	return PKT_ACT_CONTINUE;
 }
 
 #endif /* TLS_H */

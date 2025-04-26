@@ -30,6 +30,9 @@
 
 #define CT_SEQ_WINSIZE 5000
 
+// This key may be used for percpu array representing single buffer.
+static const u32 PCP_KEY = 0;
+
 struct ip_entry {
 	union {
 		struct {
@@ -123,6 +126,7 @@ struct packet_data {
 #define panic while(1) { }
 #define unreachable panic
 
+
 // dtype, struct pkt pkt, int offset, dtype *dst
 #define get_val(dtype, pkt, offset, dst, ret)		\
 if (pkt.type == SKB_PKT) {				\
@@ -142,6 +146,8 @@ if (pkt.type == SKB_PKT) {				\
 	unreachable;						\
 }
 
+
+
 	// void *data = (void *)pkt.xdp->data;		\
 	// void *data_end = (void *)pkt.xdp->data_end;	\
 	// 						\
@@ -152,6 +158,43 @@ if (pkt.type == SKB_PKT) {				\
 	// 	dst = *(dtype *)tdata;			\
 	// 	ret = 0;				\
 	// }						\
+	//
 
+
+/**
+ * Used for more advanced parsing of the pkt buffer.
+ * Use this when get_val on CT_PKT leads to verifier issues.
+ */
+static __inline int pkt_read_u8(struct pkt pkt, u32 offset, u8 *dst) {
+	int ret;
+	u8 c = 0;
+
+	if (pkt.type == CT_PKT) {
+		asm volatile(
+			"r2 = %[offset]\n\t"
+			"r2 += 1\n\t"
+			"if r2 > %[bsz] goto .cte_%=\n\t"
+			"r1 = %[buf]\n\t"
+			"r1 += %[offset]\n\t"
+			"%[ret] = 0\n\t"
+			"%[c] = *(u8 *)(r1 + 0)\n\t"
+			"goto +1\n\t"
+			".cte_%=:\n\t"
+			"%[ret] = 1\n\t"
+			: [ret]"=r"(ret),
+			  [c]"=r"(c)
+			: [bsz]"i"(CT_SEQ_WINSIZE),
+			  [buf]"r"(pkt.ctv->buf),
+			  [offset]"r"(offset)
+			: "r1", "r2"
+		);
+	} else {
+		get_val(u8, pkt, offset, c, ret);
+	}
+
+	*dst = c;
+
+	return ret;
+}
 
 #endif /* TYPES_H */
