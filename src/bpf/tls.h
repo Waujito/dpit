@@ -150,14 +150,46 @@ static __inline struct sni_tls_anres analyze_tls_chlo(struct pkt pkt, u64 offset
 
 #define SNI_BUF_LEN 128
 /**
+ * May also be used for LPM TRIE
+ */
+struct sni_buf {
+	u32	prefixlen;
+	u8	data[SNI_BUF_LEN];
+};
+
+enum sni_action {
+	SNI_APPROVE,
+	SNI_BLOCK,
+	SNI_LOG
+};
+
+/**
  * Memory storage allocated for sni buffer
  */
 struct {
         __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
         __type(key, u32);
-        __type(value, char[SNI_BUF_LEN]);
+        __type(value, struct sni_buf);
         __uint(max_entries, 1);
 } sni_buf_map SEC(".maps");
+
+/**
+ * It seems like trie for IP mapping also works great with SNI domains mapping.
+ * One notice is that it should be reversed for the most significant part
+ * of the domain to go first. But when reversed it works pretty cool and 
+ * supports not only mapping of full domain but also mapping from bottom 
+ * of it (like qwerty.google.com will be mapped to .google.com and gle.com)
+ *
+ * If you want to escape to map google.com to gle.com use point-terminator
+ * Pass .gle.com to this map and it will map only *.gle.com, gle.com including
+ */
+struct {
+        __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+        __type(key, struct sni_buf);
+        __type(value, enum sni_action);
+        __uint(map_flags, BPF_F_NO_PREALLOC);
+        __uint(max_entries, 255);
+} sni_lpm_map SEC(".maps");
 
 static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u64 offset) {
 	int ret;
@@ -220,16 +252,20 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 		bpf_printk("Found SNI in TLS in off %d and len %d", chres.sni_offset, chres.sni_length);
 		u32 sni_length = chres.sni_length;
 		u32 sni_offset = chres.sni_offset;
-		char *sni_buf;
+		struct sni_buf *sni_tbuf;
 
-		sni_buf = bpf_map_lookup_elem(&sni_buf_map, &PCP_KEY);
-		if (sni_buf == NULL) {
+		sni_tbuf = bpf_map_lookup_elem(&sni_buf_map, &PCP_KEY);
+		if (sni_tbuf == NULL) {
 			// should be unreachable
 			bpf_printk("FATAL: Cannot get value storage");
 			return PKT_ACT_CONTINUE;
 		}
-		// one for NULL-terminator
-		if (sni_length > SNI_BUF_LEN - 1) {
+
+		char *sni_buf = (char *)(&sni_tbuf->data);
+
+		// one for NULL-terminator and one for point-terminator 
+		// (see the description of sni_lpm_map)
+		if (sni_length > SNI_BUF_LEN - 2) {
 			bpf_printk("SNI is too large");
 			return PKT_ACT_CONTINUE;
 		}
@@ -241,9 +277,33 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 				return PKT_ACT_CONTINUE;
 			}
 		}
-		sni_buf[sni_length] = '\0';
-
+		// point-terminator
+		sni_buf[sni_length]	= '.';
+		// NULL-terminator
+		sni_buf[sni_length + 1] = '\0';
 		bpf_printk("SNI %s", sni_buf);
+
+		// reverse sni buffer for trie mapping
+		for (int i = 0, j = sni_length - 1; 
+			i < j && i < sni_length && j >= 0; i++, j--) {
+			u8 c = sni_buf[i];
+			sni_buf[i] = sni_buf[j];
+			sni_buf[j] = c;
+		}
+		bpf_printk("SNI %s", sni_buf);
+		sni_tbuf->prefixlen = (sni_length + 1) * 8;
+		enum sni_action *act = bpf_map_lookup_elem(&sni_lpm_map, sni_tbuf);
+		if (act == NULL) {
+			bpf_printk("Action not found");
+		} else {
+			bpf_printk("Action %d", (int)*act);
+
+			if (*act == SNI_BLOCK) {
+				return PKT_ACT_DROP;
+			}
+		}
+
+
 	} else if (chres.type == SNI_NOT_FOUND) {
 		bpf_printk("SNI extension not found");
 	} else if (chres.type == TLS_NOT_MAPPED) {

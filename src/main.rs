@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::mem;
 use std::mem::MaybeUninit;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::AsFd as _;
@@ -10,6 +11,10 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 
+use ebpf_prog::types::sni_action;
+use ebpf_prog::DpitSkel;
+use libbpf_rs::MapCore;
+use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
 use libbpf_rs::XdpFlags;
 use tokio::signal;
@@ -33,6 +38,16 @@ struct Command {
     /// interface to attach to
     #[arg(short = 'i', long = "interface")]
     iface: String,
+    
+    /// List of domains to block.
+    /// Pass the domains in either normal or point-prefixed form.
+    /// The mapping is performed by suffix. If the specified domain matches 
+    /// the suffix of SNI domain, it will be triggered. Pass point-terminator
+    /// if you want to escape miss-matching (like `google.com` will be matched to 
+    /// `gle.com` by default. If you pass .gle.com, it will map only `*.gle.com`
+    /// `gle.com` including)
+    #[arg(default_value = "", short = 'd', long = "block-domains")]
+    block_domains: String
 }
 
 fn init_skel<'obj>(open_object: &'obj mut MaybeUninit<OpenObject>) -> Result<ebpf_prog::DpitSkel<'obj>> {
@@ -151,6 +166,49 @@ impl<'obj> Drop for XdpController<'obj> {
     }
 }
 
+impl<'obj> DpitSkel<'obj> {
+    /// Adds SNI LPM entry to the TRIE map.
+    /// For more detailed description see sni_lpm_map definition in eBPF code.
+    /// Note, that Point-terminator is specified explicitly by user if needed.
+    ///
+    /// This function also implicitly reverses the destination string,
+    /// so user should pass the domain normally, like `.google.com`
+    fn sni_lpm_add_entry(&self, domain: &str, action: sni_action) 
+        -> Result<()> {
+        if domain.as_bytes().len() != domain.len() {
+            return Err(anyhow!("The domain MUST NOT contain Unicode. Use normal form, in ASCII"));
+        }
+
+        let mut ks = ebpf_prog::types::sni_buf::default();
+        let srev: String = domain.chars().rev().collect::<String>();
+        let bytes_string = srev.as_bytes();
+        // One for NULL-terminator and point-terminator
+        if bytes_string.len() > ks.data.len() + 2 {
+            return Err(anyhow!("Map SNI string length exceeds the limit."));
+        };
+        for (i, c) in bytes_string.iter().enumerate() {
+            ks.data[i] = *c;
+        }
+        // NULL-terminator
+        ks.data[bytes_string.len()] = '\0' as u8;
+
+        ks.prefixlen = bytes_string.len() as u32 * 8;
+
+        let key = &ks as *const ebpf_prog::types::sni_buf as *const u8;
+        let size = mem::size_of::<ebpf_prog::types::sni_buf>();
+        let key = unsafe { std::slice::from_raw_parts(key, size) };
+
+        let value = &action as *const ebpf_prog::types::sni_action as *const u8;
+        let size = mem::size_of::<ebpf_prog::types::sni_action>();
+        let value = unsafe { std::slice::from_raw_parts(value, size) };
+        self.maps.sni_lpm_map
+            .update(key, value, MapFlags::ANY)
+            .context("Error while updating the trie map")?;
+
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let opts = Command::parse();
@@ -161,6 +219,16 @@ async fn main() -> Result<()> {
     let tc_controller = TcController::new(skel.progs.handle_tc.as_fd(), opts.iface.as_str())?;
     let xdp_prog = XdpController::new(skel.progs.handle_xdp.as_fd(), opts.iface.as_str())?;
 
+    for domain in opts.block_domains.split(',') {
+        if domain.len() == 0 {
+            continue
+        }
+
+        println!("Add {domain}");
+
+        skel.sni_lpm_add_entry(domain, sni_action::SNI_BLOCK)?;
+    }
+    
     tc_controller.attach()?;
     println!("TC eggress hook started");
     xdp_prog.attach()?;

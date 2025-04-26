@@ -238,6 +238,7 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 		}
 
 		ctv->seq = seq;
+		ctv->fast_action = PKT_ACT_CONTINUE;
 
 		// Connection initiation
 		if (!pktd->ltd.tcph.ack) {
@@ -263,10 +264,16 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 			return PKT_ACT_CONTINUE;
 		}
 
+
 		u32 seq_diff = seq - ctv->seq;
 		u16 seq_offset = seq_diff - 1;
 		if (seq_offset >= CT_SEQ_WINSIZE) {
 			return PKT_ACT_CONTINUE;
+		}
+
+		if (ctv->fast_action != PKT_ACT_CONTINUE) {
+			bpf_printk("Fast action %d", ctv->fast_action);
+			return ctv->fast_action;
 		}
 
 		if (pktd->pkt.type == SKB_PKT) {
@@ -332,6 +339,9 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 			.ctv = ctv
 		};
 		act = process_tls(pkt, 0);
+		if (act == PKT_ACT_DROP) {
+			ctv->fast_action = act;
+		}
 		return act;
 
 		bpf_printk("seq difference %u", seq_diff);

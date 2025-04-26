@@ -61,15 +61,19 @@ struct ct_entry {
 	struct transport_entry tpe;
 };
 
-struct ct_value {
-	u32 seq;
-	u8 buf[CT_SEQ_WINSIZE];
-};
+
 
 enum pkt_action {
 	PKT_ACT_PASS,
 	PKT_ACT_DROP,
 	PKT_ACT_CONTINUE /* Continue in internal program flow */
+};
+
+struct ct_value {
+	u32 seq;
+	// Used for early exit if the connection is approved/dropped
+	enum pkt_action fast_action;
+	u8 buf[CT_SEQ_WINSIZE];
 };
 
 enum pkt_type {

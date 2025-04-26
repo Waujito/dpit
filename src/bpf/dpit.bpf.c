@@ -132,8 +132,18 @@ int handle_tc(struct __sk_buff *skb)
 		.type = SKB_PKT
 	};
 
-	handle_pkt(pkt);
-	return TC_ACT_UNSPEC;
+	enum pkt_action action = handle_pkt(pkt);
+
+	switch (action) {
+		case PKT_ACT_DROP:
+			bpf_printk("drop");
+			return TC_ACT_SHOT;
+
+		case PKT_ACT_PASS:
+		case PKT_ACT_CONTINUE:
+		default:
+			return TC_ACT_UNSPEC;
+	}
 }
 
 SEC("xdp")
@@ -144,8 +154,16 @@ int handle_xdp(struct xdp_md *xdp)
 		.type = XDP_PKT
 	};
 
-	handle_pkt(pkt);
-	return XDP_PASS;
+	enum pkt_action action = handle_pkt(pkt);
+	switch (action) {
+		case PKT_ACT_DROP:
+			return XDP_DROP;
+
+		case PKT_ACT_PASS:
+		case PKT_ACT_CONTINUE:
+		default:
+			return XDP_PASS;
+	}
 }
 
 char _license[] SEC("license") = "GPL";
