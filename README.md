@@ -11,3 +11,5 @@ sudo cat /sys/kernel/debug/tracing/trace_pipe
 ```
 
 Note, that this command produces the logs in real time, you don't want to restart it each time for update.
+
+Not handled right now: Urgent TCP and TLS record fragmentation of Client Hello
