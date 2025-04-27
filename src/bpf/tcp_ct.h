@@ -344,6 +344,11 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 		if (act == PKT_ACT_DROP) {
 			ctv->fast_action = act;
 		}
+
+		if (cbts.urg) {
+			ctv->seq += 1;
+		}
+
 		return act;
 
 		bpf_printk("seq difference %u", seq_diff);
