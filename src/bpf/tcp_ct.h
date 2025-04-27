@@ -39,12 +39,20 @@ struct {
         __uint(max_entries, 1);
 } ct_value_storage SEC(".maps");
 
+enum cbl_type {
+	CBL_TYPE_CT,
+	CBL_TYPE_XDP,
+};
+
 struct cbl_cts {
+	enum cbl_type type;
+	struct xdp_md *ctx;
 	struct ct_value *src;
 	struct ct_value *dst;
 	u32 src_off;
 	u32 dst_off;
 	u32 len;
+	u16 urg;
 };
 
 static long copy_ctvs_with_offset_callback(u64 index, void *ctx) {
@@ -52,148 +60,116 @@ static long copy_ctvs_with_offset_callback(u64 index, void *ctx) {
 	if (index >= cbtx->len) {
 		return 1;
 	}
-
 	int ret;
 
+	if (cbtx->urg != 0) {
+		if (index + 1 == cbtx->urg) {
+			bpf_tt_printk("URGENT detected");
+			return 0;
+		} else if (index >= cbtx->urg && index > 0) {
+			index--;
+		}
+	}
+
+	u8 c;
+
+	if (cbtx->type == CBL_TYPE_CT) {
+		asm volatile(
+			"r5 = %[src_off]\n\t"
+			"r5 += %[idx]\n\t"
+			"if r5 >= %[ct_ws] goto .cp_errex_%=\n\t"
+			"r2 = %[sbuf]\n\t"
+			"r2 += r5\n\t"
+			"%[c] = *(u8 *)(r2 + 0)\n\t"
+			"%[ret] = 0\n\t"
+			"goto +1\n\t"
+			".cp_errex_%=:\n\t"
+			"%[ret] = -1\n\t"
+			:	[ret]"=r"(ret),
+				[c]"=r"(c)
+			:	[ct_ws]"i"(CT_SEQ_WINSIZE), 
+				[dst_off]"r"(cbtx->dst_off),
+				[src_off]"r"(cbtx->src_off),
+				[sbuf]"r"(cbtx->src->buf),
+				[idx]"r"((u32)index)
+			: "r2", "r5"
+		);
+
+		if (ret == 1) {
+			bpf_printk("Error in ctcpy");
+			return 1;
+		}
+	} else if (cbtx->type == CBL_TYPE_XDP) {
+		asm volatile(
+			"if %[idx] > 0x1fff goto .cp_errex_%=\n\t"
+			"if %[doff] > 0x1fff goto .cp_errex_%=\n\t"
+			"r5 = %[dstart]\n\t"
+			"r5 += %[idx]\n\t"
+			"r5 += %[doff]\n\t"
+			"r2 = r5\n\t"
+			"r2 += 1\n\t"
+			"if r2 > %[dend] goto .cp_errex_%=\n\t"
+			"%[c] = *(u8 *)(r5 + 0)\n\t"
+			"%[ret] = 0\n\t"
+			"goto +1\n\t"
+			".cp_errex_%=:\n\t"
+			"%[ret] = -1\n\t"
+			:	[ret]"=r"(ret),
+				[c]"=r"(c)
+			:	[ct_ws]"i"(CT_SEQ_WINSIZE), 
+				[dstart]"r"(cbtx->ctx->data),
+				[dend]"r"(cbtx->ctx->data_end),
+				[idx]"r"((u32)index),
+				[doff]"r"(cbtx->src_off)
+			: "r2", "r5"
+		);
+
+		if (ret == 1) {
+			bpf_printk("Error in xdcpy");
+			return 1;
+		}
+	} else {
+		unreachable;
+	}
+
 	asm volatile(
-		"r5 = %[src_off]\n\t"
-		"r5 += %[idx]\n\t"
 		"r6 = %[dst_off]\n\t"
 		"r6 += %[idx]\n\t"
-		"if r5 >= %[ct_ws] goto .cp_errex_%=\n\t"
 		"if r6 >= %[ct_ws] goto .cp_errex_%=\n\t"
-		"r2 = %[sbuf]\n\t"
-		"r2 += r5\n\t"
-		"r3 = *(u8 *)(r2 + 0)\n\t"
 		"r2 = %[dbuf]\n\t"
 		"r2 += r6\n\t"
-		"*(u8 *)(r2 + 0) = r3\n\t"
+		"r5 = *(u8 *)(r2 + 0)\n\t"
+		"*(u8 *)(r2 + 0) = %[c]\n\t"
+		"if r5 == 0 goto +3\n\t"
+		"if r5 == %[c] goto +2\n\t"
+		"%[ret] = 2\n\t"
+		"goto +1\n\t"
 		"%[ret] = 0\n\t"
 		"goto +1\n\t"
 		".cp_errex_%=:\n\t"
 		"%[ret] = 1\n\t"
-		: [ret]"=r"(ret)
+		:	[ret]"=r"(ret)
 		:	[ct_ws]"i"(CT_SEQ_WINSIZE), 
-			[src_off]"r"(cbtx->src_off),
+			[c]"r"(c),
 			[dst_off]"r"(cbtx->dst_off),
-			[len]"r"(cbtx->len),
 			[dbuf]"r"(cbtx->dst->buf),
-			[sbuf]"r"(cbtx->src->buf),
 			[idx]"r"((u32)index)
-		: "r2", "r3", "r5", "r6"
+		: "r2", "r5", "r6"
 	);
 
-	if (ret == 1) {
-		bpf_printk("Return in ctvs");
+	
+	if (ret == 2) {
+		cbtx->dst->flags |= CT_FLAG_OVERWRITTEN;
+		ret = 0;
 	}
-
 
 	return ret;
 }
 
-static __inline int copy_ctvs_with_offset(struct ct_value *src, 
-					  struct ct_value *dst,
-					  u32 src_off,
-					  u32 dst_off,
-					  u32 len
-) {
+static __inline int copy_ctvs_with_offset(struct cbl_cts cbts) {
 	int ret;
-
-	struct cbl_cts cbts = {
-		.src = src,
-		.dst = dst,
-		.src_off = src_off,
-		.dst_off = dst_off,
-		.len = len
-	};
 
 	ret = bpf_loop(CT_SEQ_WINSIZE, copy_ctvs_with_offset_callback, &cbts, 0);
-
-	bpf_printk("ret %d", ret);
-
-	return -(ret >= 0);
-}
-
-struct xdpbfs_cts {
-	struct xdp_md *ctx;
-	struct ct_value *dst;
-	u32 src_off;
-	u32 dst_off;
-	u32 len;
-};
-
-static long copy_xdpbfs_with_offset_callback(u64 index, void *ctx) {
-	struct xdpbfs_cts *cbtx = ctx;	
-	if (index >= cbtx->len) {
-		return 1;
-	}
-
-	u64 dstart = cbtx->ctx->data;
-	u64 dend = cbtx->ctx->data_end;
-	u32 doff = cbtx->src_off;
-	if (doff > 0x0fff) {
-		return 1;
-	}
-
-	dstart += doff;
-	if (dstart > dend) {
-		return 1;
-	}
-
-	int ret;
-
-	asm volatile(
-		"r5 = %[dstart]\n\t"
-		"r5 += %[idx]\n\t"
-		"r3 = r5\n\t"
-		"r3 += 1\n\t"
-		"r6 = %[dst_off]\n\t"
-		"r6 += %[idx]\n\t"
-		"if r3 > %[dend] goto .cp_errex_%=\n\t"
-		"if r6 >= %[ct_ws] goto .cp_errex_%=\n\t"
-		"r3 = *(u8 *)(r5 + 0)\n\t"
-		"r2 = %[dbuf]\n\t"
-		"r2 += r6\n\t"
-		"*(u8 *)(r2 + 0) = r3\n\t"
-		"%[ret] = 0\n\t"
-		"goto +1\n\t"
-		".cp_errex_%=:\n\t"
-		"%[ret] = 1\n\t"
-		: [ret]"=r"(ret)
-		:	[ct_ws]"i"(CT_SEQ_WINSIZE), 
-			[dstart]"r"(dstart),
-			[dend]"r"(dend),
-			[dst_off]"r"(cbtx->dst_off),
-			[len]"r"(cbtx->len),
-			[dbuf]"r"(cbtx->dst->buf),
-			[idx]"r"((u32)index)
-		: "r2", "r3", "r5", "r6"
-	);
-
-	if (ret == 1) {
-		bpf_printk("Error in xdcpy");
-	}
-
-	return ret;
-}
-
-static __inline int copy_xdpbfs_with_offset(struct xdp_md *ctx, 
-					  struct ct_value *dst,
-					  u32 src_off,
-					  u32 dst_off,
-					  u32 len
-) {
-	int ret;
-
-	struct xdpbfs_cts cbts = {
-		.ctx = ctx,
-		.dst = dst,
-		.src_off = src_off,
-		.dst_off = dst_off,
-		.len = len
-	};
-
-	ret = bpf_loop(CT_SEQ_WINSIZE, copy_xdpbfs_with_offset_callback, &cbts, 0);
 
 	bpf_printk("ret %d", ret);
 
@@ -236,9 +212,21 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 			bpf_printk("FATAL: Cannot get value storage");
 			return PKT_ACT_CONTINUE;
 		}
+	
 
 		ctv->seq = seq;
 		ctv->fast_action = PKT_ACT_CONTINUE;
+		for (int i = 0; i < CT_SEQ_WINSIZE; i++) {
+			// Clang replaces this with memset by default
+			asm volatile(
+				"r1 = %[buf]\n\t"
+				"r1 += %[idx]\n\t"
+				"*(u8 *)(r1 + 0) = 0\n\t"
+				:: [buf]"r"(ctv->buf),
+					[idx]"r"(i)
+				: "r1"
+			);
+		}
 
 		// Connection initiation
 		if (!pktd->ltd.tcph.ack) {
@@ -264,7 +252,6 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 			return PKT_ACT_CONTINUE;
 		}
 
-
 		u32 seq_diff = seq - ctv->seq;
 		u16 seq_offset = seq_diff - 1;
 		if (seq_offset >= CT_SEQ_WINSIZE) {
@@ -274,6 +261,17 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 		if (ctv->fast_action != PKT_ACT_CONTINUE) {
 			bpf_printk("Fast action %d", ctv->fast_action);
 			return ctv->fast_action;
+		}
+
+		exchange_tls_flags(pktd, ctv);
+
+		struct cbl_cts cbts = {	
+			.dst = ctv,
+			.dst_off = seq_offset,
+		};
+
+		if (pktd->ltd.tcph.urg) {
+			cbts.urg = bpf_ntohs(pktd->ltd.tcph.urg_ptr);
 		}
 
 		if (pktd->pkt.type == SKB_PKT) {
@@ -304,8 +302,13 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 			} else {
 				bpf_printk("Copied %d", copy_len);
 			}
+			
+			cbts.type = CBL_TYPE_CT;
+			cbts.src = ctvb;
+			cbts.len = copy_len;
+			cbts.src_off = 0;
 
-			copy_ctvs_with_offset(ctvb, ctv, 0, seq_offset, copy_len);
+			copy_ctvs_with_offset(cbts);
 		} else {
 			u64 dstart = pktd->pkt.xdp->data;
 			u64 dend = pktd->pkt.xdp->data_end;
@@ -325,13 +328,12 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 				copy_len = lbuf_len;
 			}
 
-			ret = copy_xdpbfs_with_offset(
-				pktd->pkt.xdp,
-				ctv,
-				pktd->ltd.payload_offset,
-				seq_offset,
-				copy_len
-			);
+			cbts.type = CBL_TYPE_XDP;
+			cbts.ctx = pktd->pkt.xdp;
+			cbts.src_off = pktd->ltd.payload_offset;
+			cbts.len = copy_len;
+
+			copy_ctvs_with_offset(cbts);
 		}
 
 		struct pkt pkt = {

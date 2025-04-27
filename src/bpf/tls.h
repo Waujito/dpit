@@ -173,6 +173,57 @@ struct {
         __uint(max_entries, 1);
 } sni_buf_map SEC(".maps");
 
+#define TLS_CONTENT_TYPE_POS	0
+#define TLS_VMAJOR_POS		1
+#define TLS_HMESSAGE_TYPE_POS	5	
+
+static __inline int exchange_tls_flags(struct packet_data *pktd, struct ct_value *ctv) {
+	int ret;
+	struct pkt pkt = pktd->pkt;
+	if (pktd->ltd.transport_type != TCP) {
+		unreachable;
+	}
+
+	u32 seq = bpf_ntohl(pktd->ltd.tcph.seq);
+	u32 seq_diff = seq - ctv->seq;
+	u16 seq_offset = seq_diff - 1;
+	int so = seq_offset;
+	
+	int content_type_off = TLS_CONTENT_TYPE_POS - so;
+	int vmajor_off = TLS_VMAJOR_POS - so;
+	int message_type_off = TLS_HMESSAGE_TYPE_POS - so;
+	if (content_type_off >= 0) {
+		u32 offset = pktd->ltd.payload_offset + content_type_off;
+		read_prc_tls(u8, tls_content_type) {
+		} else {
+			if (tls_content_type == TLS_CONTENT_TYPE_HANDSHAKE) {
+				ctv->flags |= CT_FLAG_TLS_HANDSHAKE;
+			}
+		}
+	}
+	if (vmajor_off >= 0) {
+		u32 offset = pktd->ltd.payload_offset + vmajor_off;
+		read_prc_tls(u8, tls_vmajor) {
+		} else {
+			if (tls_vmajor == 0x03) {
+				ctv->flags |= CT_FLAG_TLS_VMAJOR;
+			}
+		}
+	}
+	if (message_type_off >= 0) {
+		u32 offset = pktd->ltd.payload_offset + message_type_off;
+		read_prc_tls(u8, message_type) {
+		} else {
+			if (message_type == TLS_HANDSHAKE_TYPE_CLIENT_HELLO) {
+				ctv->flags |= CT_FLAG_TLS_CHLO;
+			}
+		}
+	}
+
+	return 0;
+}
+
+
 /**
  * It seems like trie for IP mapping also works great with SNI domains mapping.
  * One notice is that it should be reversed for the most significant part
@@ -200,17 +251,8 @@ static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u64 offs
 	read_prc_tls(u8, tls_content_type) {
 		return res;
 	}
-	
-	if (tls_content_type != TLS_CONTENT_TYPE_HANDSHAKE) {
-		res.type = TLS_NOT_MAPPED;
-		return res;
-	}
 
 	read_prc_tls(u8, tls_vmajor) {
-		return res;
-	}
-
-	if (tls_vmajor != 0x03) {
 		return res;
 	}
 
@@ -224,12 +266,22 @@ static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u64 offs
 	read_prc_tls(u8, message_type) {
 		return res;
 	}
+
+	if (tls_content_type != TLS_CONTENT_TYPE_HANDSHAKE) {
+		res.type = TLS_NOT_MAPPED;
+		return res;
+	}
+	
+	if (tls_vmajor != 0x03) {
+		return res;
+	}
+
 	if (message_type != TLS_HANDSHAKE_TYPE_CLIENT_HELLO) {
 		res.type = TLS_NOT_MAPPED;
 		return res;
 	}
-	offset -= 1;
 
+	offset -= 1;
 	read_prc_tls(u32, message_length) {
 		return res;
 	}
@@ -290,7 +342,6 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 			sni_buf[i] = sni_buf[j];
 			sni_buf[j] = c;
 		}
-		bpf_printk("SNI %s", sni_buf);
 		sni_tbuf->prefixlen = (sni_length + 1) * 8;
 		enum sni_action *act = bpf_map_lookup_elem(&sni_lpm_map, sni_tbuf);
 		if (act == NULL) {
@@ -299,6 +350,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 			bpf_printk("Action %d", (int)*act);
 
 			if (*act == SNI_BLOCK) {
+				bpf_tt_printk("SNI %s", sni_buf);
 				return PKT_ACT_DROP;
 			}
 		}
@@ -310,6 +362,24 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 		bpf_printk("NOT a TLS");
 	} else {
 		bpf_printk("Mem error");
+	}
+
+	if (pkt.type == CT_PKT) {
+		u32 flags = pkt.ctv->flags;
+		if (
+			(flags & CT_FLAG_OVERWRITTEN) == CT_FLAG_OVERWRITTEN) {
+			bpf_tt_printk("TCP MESSAGE IS OVERWRITTEN");
+
+			if (	(flags & CT_FLAG_TLS_HANDSHAKE) == 
+					CT_FLAG_TLS_HANDSHAKE &&
+				(flags & CT_FLAG_TLS_VMAJOR) == 
+					CT_FLAG_TLS_VMAJOR &&
+				(flags & CT_FLAG_TLS_CHLO) == 
+					CT_FLAG_TLS_CHLO) {
+				bpf_tt_printk("TLS CHLO MESSAGE IS OVERWRITTEN");
+				return PKT_ACT_DROP;
+			}
+		}
 	}
 
 	return PKT_ACT_CONTINUE;

@@ -69,10 +69,18 @@ enum pkt_action {
 	PKT_ACT_CONTINUE /* Continue in internal program flow */
 };
 
+
+#define CT_FLAG_TLS_HANDSHAKE	(1 << 0)
+#define CT_FLAG_TLS_VMAJOR	(1 << 1)
+#define CT_FLAG_TLS_CHLO	(1 << 2)
+#define CT_FLAG_OVERWRITTEN	(1 << 3)
+
 struct ct_value {
 	u32 seq;
 	// Used for early exit if the connection is approved/dropped
 	enum pkt_action fast_action;
+	// Additional information encoded in bitmask CT_FLAG_
+	u32 flags;
 	u8 buf[CT_SEQ_WINSIZE];
 };
 
@@ -200,5 +208,10 @@ static __inline int pkt_read_u8(struct pkt pkt, u32 offset, u8 *dst) {
 
 	return ret;
 }
+
+#undef bpf_printk
+#define bpf_printk(...) ;
+
+#define bpf_tt_printk(fmt, args...) ___bpf_pick_printk(args)(fmt, ##args)
 
 #endif /* TYPES_H */
