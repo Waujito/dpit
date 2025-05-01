@@ -252,6 +252,19 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 			return PKT_ACT_CONTINUE;
 		}
 
+
+		if (ctv->seq >= seq) {
+			u32 otdiff = ctv->seq - seq;
+			otdiff += 1;
+			bpf_tt_printk("otdiff %d", otdiff);
+			if (otdiff > CT_SEQ_WINSIZE) {
+				return PKT_ACT_CONTINUE;
+			}
+
+			pktd->ltd.payload_offset += otdiff;
+			seq += otdiff;
+		}
+
 		u32 seq_diff = seq - ctv->seq;
 		u16 seq_offset = seq_diff - 1;
 		if (seq_offset >= CT_SEQ_WINSIZE) {

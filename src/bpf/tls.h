@@ -51,102 +51,30 @@ enum chlo_tls_atype {
 	MEM_ERROR,
 };
 
+struct tls_rec_headers {
+	u8 tls_content_type;
+	u8 tls_vmajor;
+	u8 tls_vminor;
+	u16 record_length;
+} __attribute__((packed));
+struct tls_rec_header {
+	u8 tls_content_type;
+	u8 tls_vmajor;
+	u8 tls_vminor;
+	u16 record_length;
+};
+
 struct sni_tls_anres {
 	enum chlo_tls_atype type;
 	union {
 		struct {
 			u32 sni_offset;
 			u32 sni_length;
+			// Record header in start of SNI Name
+			struct tls_rec_header rhdr;
 		};
 	};
 };
-
-static __inline struct sni_tls_anres analyze_tls_chlo(struct pkt pkt, u64 offset) {
-	int ret;
-	struct sni_tls_anres res = {
-		.type = MEM_ERROR
-	};
-
-	read_prc_tls(u16, version) {
-		return res;
-	}
-
-	// random data offset
-	offset += 32;
-
-	read_prc_tls(u8, session_id_len) {
-		return res;
-	}
-	offset += session_id_len;
-
-	read_prc_tls(u16, cipher_suites_len) {
-		return res;
-	}
-	cipher_suites_len = bpf_ntohs(cipher_suites_len);
-	if (cipher_suites_len > CT_SEQ_WINSIZE) {
-		return res;
-	}
-	offset += cipher_suites_len;
-
-	read_prc_tls(u8, compression_methods_size) {
-		return res;
-	}
-	offset += compression_methods_size;
-
-	read_prc_tls(u16, extensions_size) {
-		return res;
-	}
-	extensions_size = bpf_ntohs(extensions_size);
-	u32 ext_read = 0;
-
-	int i = 0;
-	while (i < 50 && ext_read != extensions_size) {
-		if (offset > CT_SEQ_WINSIZE) {
-			return res;
-		}
-		read_prc_tls(u16, extension_type) {
-			return res;
-		}
-		read_prc_tls(u16, extension_size) {
-			return res;
-		}	
-		extension_type = bpf_ntohs(extension_type);
-		extension_size = bpf_ntohs(extension_size);
-
-		if (offset + extension_size > pkt_len(pkt) ||
-			extension_size > CT_SEQ_WINSIZE
-		) {
-			return res;
-		}
-
-		if (extension_type != TLS_EXTENSION_SNI) {
-			offset = offset + extension_size;
-			i += 1;
-			ext_read += 4 + extension_size;
-			continue;
-		}
-
-		read_prc_tls(u16, sni_list_len) {
-			return res;
-		}
-		sni_list_len = bpf_ntohs(sni_list_len);
-		// TODO: right now it goes up to only one SNI name
-		read_prc_tls(u8, sni_type) {
-			return res;
-		}
-		read_prc_tls(u16, sni_length) {
-			return res;
-		}
-		sni_length = bpf_ntohs(sni_length);
-		res.type = SNI_FOUND;
-		res.sni_length = sni_length;
-		res.sni_offset = offset;
-
-		return res;
-	}
-	res.type = SNI_NOT_FOUND;
-	return res;
-}
 
 #define SNI_BUF_LEN 128
 /**
@@ -223,7 +151,6 @@ static __inline int exchange_tls_flags(struct packet_data *pktd, struct ct_value
 	return 0;
 }
 
-
 /**
  * It seems like trie for IP mapping also works great with SNI domains mapping.
  * One notice is that it should be reversed for the most significant part
@@ -242,37 +169,222 @@ struct {
         __uint(max_entries, 255);
 } sni_lpm_map SEC(".maps");
 
-static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u64 offset) {
+
+static __inline int read_tls_record_header(struct pkt pkt, u32 *offset, struct tls_rec_header *hdr) {
+	int ret = 0;
+	u32 toffset = *offset;
+	struct tls_rec_headers shdr;
+	u8 *rbuf = (u8 *)&shdr;
+
+	for (int i = 0; i < sizeof(struct tls_rec_headers); i++) {
+		ret = pkt_read_u8(pkt, toffset, rbuf + i);
+		if (ret) {
+			return ret;
+		}
+		toffset += 1;
+	}
+
+	hdr->tls_content_type = shdr.tls_content_type;
+	hdr->tls_vmajor = shdr.tls_vmajor;
+	hdr->tls_vminor = shdr.tls_vminor;
+	hdr->record_length = bpf_ntohs(shdr.record_length);
+	// u32 uwu = hdr->record_length;
+	// bpf_tt_printk("Read rec length %d", 23);
+	*offset = toffset;
+
+	if (hdr->tls_content_type != TLS_CONTENT_TYPE_HANDSHAKE) {
+		return -1;
+	}
+	
+	if (hdr->tls_vmajor != 0x03) {
+		return -1;
+	}
+
+	return 0;
+}
+
+struct rlch_cb_ctx {
+	struct pkt pkt;
+	struct tls_rec_header *rhdr;
+	u32 *offset;
+	int ret;
+};
+
+static long read_tls_rch_callback(u64 index, void *ctx) {
+	struct rlch_cb_ctx *rctx = ctx;
+	struct pkt pkt = rctx->pkt;
+	int ret = read_tls_record_header(pkt, rctx->offset, rctx->rhdr);
+	if (ret) {
+		rctx->ret = -1;
+		return 1;
+	}
+
+	if (rctx->rhdr->record_length == 0) {
+		rctx->ret = -1;
+		return 0;
+	}
+
+	rctx->ret = 0;
+	return 1;
+}
+
+static __inline int read_tls_rch_loop(struct pkt pkt, u32 *offset, struct tls_rec_header *hdr) {
+	struct rlch_cb_ctx ctx = {
+		.offset = offset,
+		.pkt = pkt,
+		.rhdr = hdr
+	};
+
+
+	long ret = bpf_loop(CT_SEQ_WINSIZE, read_tls_rch_callback, &ctx, 0);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return ctx.ret;
+}
+
+static __inline int tls_rch_read_u8(
+	struct pkt pkt, 
+	u32 *offset, 
+	struct tls_rec_header *rhdr, 
+	u8 *dst
+) { 
+
+	int ret;
+	if (rhdr->record_length == 0) {
+		ret = read_tls_rch_loop(pkt, offset, rhdr);
+		if (ret) {
+			return ret;
+		}
+	}
+
+	ret = pkt_read_u8(pkt, *offset, dst);
+	if (ret) {
+		return ret;
+	}
+	(*offset)++;
+	rhdr->record_length -= 1;
+
+	return 0;
+}
+
+static __inline int tls_rch_read_u16(
+	struct pkt pkt,
+	u32 *offset,
+	struct tls_rec_header *rhdr,
+	u16 *dst
+) {
+	int ret;
+
+	u16 sst;
+	u8 d8s[2];
+	for (int i = 0; i < 2; i++) {
+		ret = tls_rch_read_u8(pkt, offset, rhdr, d8s + i);
+		if (ret) {
+			return ret;
+		}
+	}
+
+	sst = d8s[0];
+	sst <<= 8;
+	sst += d8s[1];
+	sst = bpf_htons(sst);
+	*dst = sst;
+
+	return 0;
+}
+
+static __inline int tls_rch_jmjoff_iter(struct pkt pkt, struct tls_rec_header *rhdr, u32 *jumped, u32 joff, u32 *offset) {
+	int ret;	
+	if (rhdr->record_length == 0) {
+		ret = read_tls_rch_loop(pkt, offset, rhdr);
+		if (ret) {
+			return ret;
+		}
+	}
+
+	u32 jump_pit = joff - *jumped;
+	if (rhdr->record_length < jump_pit) {
+		jump_pit = rhdr->record_length;
+	}
+	rhdr->record_length -= jump_pit;
+	*offset += jump_pit;
+	*jumped += jump_pit;
+
+	return 0;
+}
+
+
+struct tls_rch_jmjoff_iter_ctx {
+	struct pkt pkt;
+	struct tls_rec_header *rhdr;
+	u32 *jumped;
+	u32 joff;
+	u32 *offset;
+	int cret;
+};
+
+static long tls_rch_jmjoff_iter_callback(u64 index, void *ctx) {
+	struct tls_rch_jmjoff_iter_ctx *rctx = ctx;
+	int ret;
+
+	if (*rctx->jumped >= rctx->joff) {
+		rctx->cret = 0;
+		return 1;
+	}
+	ret = tls_rch_jmjoff_iter(rctx->pkt, rctx->rhdr, rctx->jumped, rctx->joff, rctx->offset);
+	if (ret) {
+		rctx->cret = -1;
+		return 1;
+	}
+
+	rctx->cret = 0;
+	if (*rctx->jumped >= rctx->joff) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
+static __inline int tls_rch_jump_joff(
+	struct pkt pkt, 
+	u32 *offset, 
+	struct tls_rec_header *rhdr, 
+	u32 joff
+) { 
+
+	int ret;
+	u32 jumped = 0;
+	int i = 0;
+
+	while (jumped < joff && i < 4) {
+		ret = tls_rch_jmjoff_iter(pkt, rhdr, &jumped, joff, offset);
+		if (ret) {
+			return ret;
+		}
+		i++;
+	}
+
+	if (jumped == joff) {
+		return 0;
+	} else {
+		return -1;
+	}
+
+	return 0;
+}
+
+static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u32 offset) {
 	int ret;
 	struct sni_tls_anres res = {
 		.type = MEM_ERROR
 	};
+	struct tls_rec_header rhdr;
+	rhdr.record_length = 0;
 
-	read_prc_tls(u8, tls_content_type) {
-		return res;
-	}
-
-	read_prc_tls(u8, tls_vmajor) {
-		return res;
-	}
-
-	read_prc_tls(u8, tls_vminor) {
-		return res;
-	}
-	read_prc_tls(u16, record_length) {
-		return res;
-	}
-
-	read_prc_tls(u8, message_type) {
-		return res;
-	}
-
-	if (tls_content_type != TLS_CONTENT_TYPE_HANDSHAKE) {
-		res.type = TLS_NOT_MAPPED;
-		return res;
-	}
-	
-	if (tls_vmajor != 0x03) {
+	u8 message_type;
+	ret = tls_rch_read_u8(pkt, &offset, &rhdr, &message_type);
+	if (ret) {
 		return res;
 	}
 
@@ -281,18 +393,150 @@ static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u64 offs
 		return res;
 	}
 
-	offset -= 1;
-	read_prc_tls(u32, message_length) {
+	u32 message_length = 0;
+	u8 mglb;
+	ret = tls_rch_read_u8(pkt, &offset, &rhdr, &mglb);
+	if (ret) {
 		return res;
 	}
-	message_length = bpf_ntohl(message_length);
-	message_length &= 0x00ffffff;
+	message_length <<= 8;
+	message_length += mglb;
+	ret = tls_rch_read_u8(pkt, &offset, &rhdr, &mglb);
+	if (ret) {
+		return res;
+	}
+	message_length <<= 8;
+	message_length += mglb;
+	ret = tls_rch_read_u8(pkt, &offset, &rhdr, &mglb);
+	if (ret) {
+		return res;
+	}
+	message_length <<= 8;
+	message_length += mglb;
+
+	// It is already in the host byte order
+	// message_length = bpf_ntohl(message_length);
 	
 	bpf_printk("Message length: %u of %u", message_length, pkt_len(pkt) - offset);
 
 	int possibly_truncated = offset + message_length > pkt_len(pkt);
-	res = analyze_tls_chlo(pkt, offset);
 
+
+	u16 version;
+	tls_rch_read_u16(pkt, &offset, &rhdr, &version);
+	if (ret) {
+		return res;
+	}
+
+	// random data offset
+	ret = tls_rch_jump_joff(pkt, &offset, &rhdr, 32);
+	if (ret) {
+		return res;
+	}
+
+	u8 session_id_len;
+	ret = tls_rch_read_u8(pkt, &offset, &rhdr, &session_id_len);
+	if (ret) {
+		return res;
+	}
+
+	ret = tls_rch_jump_joff(pkt, &offset, &rhdr, session_id_len);
+	if (ret) {
+		return res;
+	}
+
+	u16 cipher_suites_len;
+	tls_rch_read_u16(pkt, &offset, &rhdr, &cipher_suites_len);
+	if (ret) {
+		return res;
+	}
+
+	cipher_suites_len = bpf_ntohs(cipher_suites_len);
+	ret = tls_rch_jump_joff(pkt, &offset, &rhdr, cipher_suites_len);
+	if (ret) {
+		return res;
+	}
+
+	u8 compression_methods_size;
+	ret = tls_rch_read_u8(pkt, &offset, &rhdr, &compression_methods_size);
+	if (ret) {
+		return res;
+	}
+
+	ret = tls_rch_jump_joff(pkt, &offset, &rhdr, compression_methods_size);
+	if (ret) {
+		return res;
+	}
+
+	u16 extensions_size;
+	tls_rch_read_u16(pkt, &offset, &rhdr, &extensions_size);
+	if (ret) {
+		return res;
+	}
+
+	extensions_size = bpf_ntohs(extensions_size);
+	u32 ext_read = 0;
+
+	int i = 0;
+	while (i < 50 && ext_read != extensions_size) {
+		u16 extension_type;
+		tls_rch_read_u16(pkt, &offset, &rhdr, &extension_type);
+		if (ret) {
+			return res;
+		}
+
+		u16 extension_size;
+		tls_rch_read_u16(pkt, &offset, &rhdr, &extension_size);
+		if (ret) {
+			return res;
+		}
+
+		extension_type = bpf_ntohs(extension_type);
+		extension_size = bpf_ntohs(extension_size);
+
+
+		if (extension_type != TLS_EXTENSION_SNI) {
+			ret = tls_rch_jump_joff(pkt, &offset, &rhdr, extension_size);
+			if (ret) {
+				return res;
+			}
+
+			i += 1;
+			ext_read += 4 + extension_size;
+			continue;
+		}
+
+		u16 sni_list_len;
+		tls_rch_read_u16(pkt, &offset, &rhdr, &sni_list_len);
+		if (ret) {
+			return res;
+		}
+
+		sni_list_len = bpf_ntohs(sni_list_len);
+
+		// TODO: right now it goes up to only one SNI name
+		u8 sni_type;
+		tls_rch_read_u8(pkt, &offset, &rhdr, &sni_type);
+		if (ret) {
+			return res;
+		}
+
+		u16 sni_length;
+		tls_rch_read_u16(pkt, &offset, &rhdr, &sni_length);
+		if (ret) {
+			return res;
+		}
+		sni_length = bpf_ntohs(sni_length);
+		res.sni_length = sni_length;
+		res.type = SNI_FOUND;
+		res.sni_length = sni_length;
+		res.sni_offset = offset;
+		res.rhdr = rhdr;
+
+		return res;
+	}
+
+	res.type = SNI_NOT_FOUND;
 	return res;
 }
 
@@ -321,8 +565,12 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 			bpf_printk("SNI is too large");
 			return PKT_ACT_CONTINUE;
 		}
+
+		u32 soffset = chres.sni_offset;
+		struct tls_rec_header rhdr = chres.rhdr;
+
 		for (int i = 0; i < sni_length; i++) {
-			ret = pkt_read_u8(pkt, sni_offset + i, (u8 *)sni_buf + i);
+			ret = tls_rch_read_u8(pkt, &chres.sni_offset, &chres.rhdr, (u8 *)sni_buf + i);
 
 			if (ret) {
 				bpf_printk("sni copy error");
@@ -333,7 +581,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 		sni_buf[sni_length]	= '.';
 		// NULL-terminator
 		sni_buf[sni_length + 1] = '\0';
-		bpf_printk("SNI %s", sni_buf);
+		bpf_tt_printk("SNI %s", sni_buf);
 
 		// reverse sni buffer for trie mapping
 		for (int i = 0, j = sni_length - 1; 
@@ -350,7 +598,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 			bpf_printk("Action %d", (int)*act);
 
 			if (*act == SNI_BLOCK) {
-				bpf_tt_printk("SNI %s", sni_buf);
+				bpf_tt_printk("Blocked SNI %s", sni_buf);
 				return PKT_ACT_DROP;
 			}
 		}
