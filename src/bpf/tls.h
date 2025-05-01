@@ -593,7 +593,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 		// bpf_loop increases insns cap
 		ret = bpf_loop(sni_length, reverse_syms_cb, &rsctx, 0);
 		if (ret < 0) {
-			return ret;
+			return PKT_ACT_CONTINUE;
 		}
 
 
