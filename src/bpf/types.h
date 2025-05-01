@@ -209,6 +209,54 @@ static __inline int pkt_read_u8(struct pkt pkt, u32 offset, u8 *dst) {
 	return ret;
 }
 
+struct rscb_ctx {
+	u8 *buf;
+	u32 len;
+	u64 buflen;
+};
+
+/**
+ * Reverses the two buffer symbols
+ * Usage:
+ * ```
+ *	struct rscb_ctx rsctx = {
+ *		.len = sni_length,
+ *		.buflen = SNI_BUF_LEN,
+ *		.buf = (u8 *)sni_buf
+ *	};
+ *	// reverse sni buffer for trie mapping
+ *	// bpf_loop increases insns cap
+ *	ret = bpf_loop(sni_length, reverse_syms_cb, &rsctx, 0);
+ *	if (ret < 0) {
+ *		return ret;
+ *	}
+ * ```
+ *
+ */
+static long reverse_syms_cb(u64 index, void *ctx) {
+	struct rscb_ctx *rctx = ctx;
+	if (index >= rctx->buflen) {
+		return 1;
+	}
+
+	if (rctx->len < index + 1) {
+		return 1;
+	}
+	u32 j = rctx->len - index - 1;
+	if (j >= rctx->buflen) {
+		return 1;
+	}
+	if (index < j) {
+		u8 c = rctx->buf[index];
+		rctx->buf[index] = rctx->buf[j];
+		rctx->buf[j] = c;
+	} else {
+		return 1;
+	}
+
+	return 0;
+}
+
 #undef bpf_printk
 #define bpf_printk(...) ;
 

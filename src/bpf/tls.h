@@ -540,34 +540,6 @@ static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u32 offs
 	return res;
 }
 
-struct rscb_ctx {
-	u8 *buf;
-	u32 len;
-};
-static long reverse_syms_cb(u64 index, void *ctx) {
-	struct rscb_ctx *rctx = ctx;
-	if (index >= SNI_BUF_LEN) {
-		return 1;
-	}
-
-	if (rctx->len < index + 1) {
-		return 1;
-	}
-	u32 j = rctx->len - index - 1;
-	if (j >= SNI_BUF_LEN) {
-		return 1;
-	}
-	if (index < j) {
-		u8 c = rctx->buf[index];
-		rctx->buf[index] = rctx->buf[j];
-		rctx->buf[j] = c;
-	} else {
-		return 1;
-	}
-
-	return 0;
-}
-
 static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 	int ret;
 
@@ -614,6 +586,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 
 		struct rscb_ctx rsctx = {
 			.len = sni_length,
+			.buflen = SNI_BUF_LEN,
 			.buf = (u8 *)sni_buf
 		};
 		// reverse sni buffer for trie mapping
