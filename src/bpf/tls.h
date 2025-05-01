@@ -540,6 +540,34 @@ static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u32 offs
 	return res;
 }
 
+struct rscb_ctx {
+	u8 *buf;
+	u32 len;
+};
+static long reverse_syms_cb(u64 index, void *ctx) {
+	struct rscb_ctx *rctx = ctx;
+	if (index >= SNI_BUF_LEN) {
+		return 1;
+	}
+
+	if (rctx->len < index + 1) {
+		return 1;
+	}
+	u32 j = rctx->len - index - 1;
+	if (j >= SNI_BUF_LEN) {
+		return 1;
+	}
+	if (index < j) {
+		u8 c = rctx->buf[index];
+		rctx->buf[index] = rctx->buf[j];
+		rctx->buf[j] = c;
+	} else {
+		return 1;
+	}
+
+	return 0;
+}
+
 static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 	int ret;
 
@@ -557,7 +585,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 			return PKT_ACT_CONTINUE;
 		}
 
-		char *sni_buf = (char *)(&sni_tbuf->data);
+		char *sni_buf = (char *)(sni_tbuf->data);
 
 		// one for NULL-terminator and one for point-terminator 
 		// (see the description of sni_lpm_map)
@@ -568,6 +596,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 
 		u32 soffset = chres.sni_offset;
 		struct tls_rec_header rhdr = chres.rhdr;
+		int sni_length2 = sni_length;
 
 		for (int i = 0; i < sni_length; i++) {
 			ret = tls_rch_read_u8(pkt, &chres.sni_offset, &chres.rhdr, (u8 *)sni_buf + i);
@@ -583,13 +612,18 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 		sni_buf[sni_length + 1] = '\0';
 		bpf_tt_printk("SNI %s", sni_buf);
 
+		struct rscb_ctx rsctx = {
+			.len = sni_length,
+			.buf = (u8 *)sni_buf
+		};
 		// reverse sni buffer for trie mapping
-		for (int i = 0, j = sni_length - 1; 
-			i < j && i < sni_length && j >= 0; i++, j--) {
-			u8 c = sni_buf[i];
-			sni_buf[i] = sni_buf[j];
-			sni_buf[j] = c;
+		// bpf_loop increases insns cap
+		ret = bpf_loop(sni_length, reverse_syms_cb, &rsctx, 0);
+		if (ret < 0) {
+			return ret;
 		}
+
+
 		sni_tbuf->prefixlen = (sni_length + 1) * 8;
 		enum sni_action *act = bpf_map_lookup_elem(&sni_lpm_map, sni_tbuf);
 		if (act == NULL) {
