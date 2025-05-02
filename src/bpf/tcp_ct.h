@@ -216,6 +216,8 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 
 		ctv->seq = seq;
 		ctv->fast_action = PKT_ACT_CONTINUE;
+		ctv->chlo_state = MEM_ERROR;
+		ctv->sni_action = SNI_APPROVE;
 		for (int i = 0; i < CT_SEQ_WINSIZE; i++) {
 			// Clang replaces this with memset by default
 			asm volatile(
@@ -353,7 +355,7 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 			.type = CT_PKT,
 			.ctv = ctv
 		};
-		act = process_tls(pkt, 0);
+		act = process_tls(pkt, pktd, 0);
 		if (act == PKT_ACT_DROP) {
 			ctv->fast_action = act;
 		}

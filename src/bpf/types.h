@@ -69,11 +69,24 @@ enum pkt_action {
 	PKT_ACT_CONTINUE /* Continue in internal program flow */
 };
 
+enum chlo_tls_atype {
+	SNI_FOUND,
+	SNI_NOT_FOUND,
+	TLS_NOT_MAPPED,
+	MEM_ERROR,
+};
+
+enum sni_action {
+	SNI_APPROVE,
+	SNI_BLOCK,
+	SNI_BLOCK_OVERWRITTEN,
+};
 
 #define CT_FLAG_TLS_HANDSHAKE	(1 << 0)
 #define CT_FLAG_TLS_VMAJOR	(1 << 1)
 #define CT_FLAG_TLS_CHLO	(1 << 2)
 #define CT_FLAG_OVERWRITTEN	(1 << 3)
+#define CT_FLAG_SENT_TO_USER	(1 << 4)
 
 struct ct_value {
 	u32 seq;
@@ -81,6 +94,8 @@ struct ct_value {
 	enum pkt_action fast_action;
 	// Additional information encoded in bitmask CT_FLAG_
 	u32 flags;
+	enum chlo_tls_atype	chlo_state;
+	enum sni_action		sni_action;
 	u8 buf[CT_SEQ_WINSIZE];
 };
 

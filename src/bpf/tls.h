@@ -44,13 +44,6 @@ if (ret)
 #define pkt_len(pkt)\
 (pkt.type == XDP_PKT ? pkt.xdp->data_end - pkt.xdp->data : (pkt.type == SKB_PKT ? pkt.skb->len : CT_SEQ_WINSIZE))
 
-enum chlo_tls_atype {
-	SNI_FOUND,
-	SNI_NOT_FOUND,
-	TLS_NOT_MAPPED,
-	MEM_ERROR,
-};
-
 struct tls_rec_headers {
 	u8 tls_content_type;
 	u8 tls_vmajor;
@@ -83,12 +76,6 @@ struct sni_tls_anres {
 struct sni_buf {
 	u32	prefixlen;
 	u8	data[SNI_BUF_LEN];
-};
-
-enum sni_action {
-	SNI_APPROVE,
-	SNI_BLOCK,
-	SNI_LOG
 };
 
 /**
@@ -540,15 +527,40 @@ static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u32 offs
 	return res;
 }
 
-static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
+struct tls_sni_signaling {
+	struct lnetwork_data lnd;
+	struct ltransport_data ltd;
+	enum chlo_tls_atype sni_type;
+	struct sni_buf sni_data;
+	enum sni_action act;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(u32));
+} tls_sni_signaling_map SEC(".maps");
+
+/**
+ * Secure storage for tls_sni_signaling context preventing any stack overflows
+ */
+struct {
+        __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+        __type(key, u32);
+        __type(value, struct tls_sni_signaling);
+        __uint(max_entries, 1);
+} tls_sni_signaling_storage SEC(".maps");
+
+static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *pktd, u32 offset) {
 	int ret;
+	enum sni_action act;
+	act = SNI_APPROVE;
+	struct sni_buf *sni_tbuf = NULL;
 
 	struct sni_tls_anres chres = analyze_tls_record(pkt, offset);
 	if (chres.type == SNI_FOUND) {
 		bpf_printk("Found SNI in TLS in off %d and len %d", chres.sni_offset, chres.sni_length);
 		u32 sni_length = chres.sni_length;
-		u32 sni_offset = chres.sni_offset;
-		struct sni_buf *sni_tbuf;
 
 		sni_tbuf = bpf_map_lookup_elem(&sni_buf_map, &PCP_KEY);
 		if (sni_tbuf == NULL) {
@@ -565,10 +577,6 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 			bpf_printk("SNI is too large");
 			return PKT_ACT_CONTINUE;
 		}
-
-		u32 soffset = chres.sni_offset;
-		struct tls_rec_header rhdr = chres.rhdr;
-		int sni_length2 = sni_length;
 
 		for (int i = 0; i < sni_length; i++) {
 			ret = tls_rch_read_u8(pkt, &chres.sni_offset, &chres.rhdr, (u8 *)sni_buf + i);
@@ -598,19 +606,13 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 
 
 		sni_tbuf->prefixlen = (sni_length + 1) * 8;
-		enum sni_action *act = bpf_map_lookup_elem(&sni_lpm_map, sni_tbuf);
-		if (act == NULL) {
+		enum sni_action *actp = bpf_map_lookup_elem(&sni_lpm_map, sni_tbuf);
+		if (actp == NULL) {
 			bpf_printk("Action not found");
 		} else {
 			bpf_printk("Action %d", (int)*act);
-
-			if (*act == SNI_BLOCK) {
-				bpf_tt_printk("Blocked SNI %s", sni_buf);
-				return PKT_ACT_DROP;
-			}
+			act = *actp;	
 		}
-
-
 	} else if (chres.type == SNI_NOT_FOUND) {
 		bpf_printk("SNI extension not found");
 	} else if (chres.type == TLS_NOT_MAPPED) {
@@ -632,12 +634,88 @@ static __inline enum pkt_action process_tls(struct pkt pkt, u32 offset) {
 				(flags & CT_FLAG_TLS_CHLO) == 
 					CT_FLAG_TLS_CHLO) {
 				bpf_tt_printk("TLS CHLO MESSAGE IS OVERWRITTEN");
-				return PKT_ACT_DROP;
+				act = SNI_BLOCK_OVERWRITTEN;
 			}
 		}
 	}
 
-	return PKT_ACT_CONTINUE;
+	if (	chres.type != SNI_FOUND && 
+		chres.type != SNI_NOT_FOUND &&
+		act == SNI_APPROVE) {
+		return PKT_ACT_CONTINUE;
+	}
+
+	int send = 1;
+	/**
+	 * Send to userspace only when the state is changed to escape duplicates
+	 */
+	if (pkt.type == CT_PKT) {
+		send = (pkt.ctv->flags & CT_FLAG_SENT_TO_USER) == 0;
+
+		if (!send) {
+			if (	pkt.ctv->chlo_state != chres.type ||
+				pkt.ctv->sni_action != act) {
+				send = 1;
+			}
+		}
+
+		pkt.ctv->chlo_state = chres.type;
+		pkt.ctv->sni_action = act;
+	}
+
+	if (send) {
+		struct tls_sni_signaling *tlssig = 
+				bpf_map_lookup_elem(&tls_sni_signaling_storage, &PCP_KEY);
+		if (tlssig == NULL) {
+			// should be unreachable
+			bpf_printk("FATAL: Cannot get perf signaling storage");
+			goto return_verdict;
+		}
+
+		tlssig->lnd = pktd->lnd;
+		tlssig->ltd = pktd->ltd;
+		tlssig->act = act;
+		tlssig->sni_type = chres.type;
+
+		if (tlssig->sni_type == SNI_FOUND) {
+			tlssig->sni_data = *sni_tbuf;
+			tlssig->sni_data.prefixlen = chres.sni_length;
+
+			if (act == SNI_BLOCK) {
+				bpf_tt_printk("Blocked SNI %s", sni_tbuf->data);
+			}
+		}
+		
+		void *ctx;
+		if (pktd->pkt.type == XDP_PKT) {
+			ctx = pktd->pkt.xdp;
+		} else if (pktd->pkt.type == SKB_PKT) {
+			ctx = pktd->pkt.skb;
+		} else {
+			unreachable;
+		}
+
+		ret = bpf_perf_event_output(ctx, 
+		 &tls_sni_signaling_map, BPF_F_CURRENT_CPU, 
+		 tlssig, sizeof(struct tls_sni_signaling));
+
+		if (ret) {
+			bpf_tt_printk("PERF SNI event logging failure %d", ret);
+		} else {
+			bpf_tt_printk("PERF SNI logged");
+		}
+
+		if (pkt.type == CT_PKT) {
+			pkt.ctv->flags |= CT_FLAG_SENT_TO_USER;
+		}
+	}
+
+return_verdict:
+	if (act == SNI_BLOCK || act == SNI_BLOCK_OVERWRITTEN) {
+		return PKT_ACT_DROP;
+	} else {
+		return PKT_ACT_PASS;
+	}
 }
 
 #endif /* TLS_H */

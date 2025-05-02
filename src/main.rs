@@ -6,17 +6,22 @@ use std::mem;
 use std::mem::MaybeUninit;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::AsFd as _;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 
+use ebpf_prog::types::chlo_tls_atype;
 use ebpf_prog::types::sni_action;
+use ebpf_prog::types::tls_sni_signaling;
 use ebpf_prog::DpitSkel;
 use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
+use libbpf_rs::PerfBufferBuilder;
 use libbpf_rs::XdpFlags;
+use plain::Plain;
 use tokio::signal;
 
 use clap::Parser;
@@ -209,6 +214,47 @@ impl<'obj> DpitSkel<'obj> {
     }
 }
 
+unsafe impl Plain for tls_sni_signaling {}
+
+fn process_perf_signal(sni_tls_data: &tls_sni_signaling) -> Result<()> {
+    let sni_type = unsafe { sni_tls_data.sni_type.assume_init() };
+    let act = unsafe { sni_tls_data.act.assume_init() };
+    
+    if let chlo_tls_atype::SNI_FOUND = sni_type  {
+        let sni_data = sni_tls_data.sni_data;
+        let sni_buf = &sni_data.data;
+        let sni_len = sni_data.prefixlen as usize;
+
+        if sni_len > sni_buf.len() {
+            return Err(anyhow!("sni_len is too large")); 
+        }
+
+        let sni_buf = &sni_buf[..sni_len as usize];
+        let sni_rvbuf: Vec<u8> = sni_buf.iter().rev().cloned().collect();
+        let s = std::str::from_utf8(&sni_rvbuf)?;
+
+        println!("SNI found: {} of len {}", s, sni_len);
+    }
+    println!("Type: {:?}, Action: {:?}", sni_type, act); 
+
+    Ok(())
+}
+
+fn handle_perf_event(_cpu: i32, data: &[u8]) {
+    let mut sni_tls_data = tls_sni_signaling::default();
+    let res = plain::copy_from_bytes(&mut sni_tls_data, data);
+    if let Ok(_) = res {
+        if let Err(err) = process_perf_signal(&sni_tls_data) {
+            eprintln!("handle_event error: {}", anyhow!(err));
+        }
+    } else {
+        eprintln!("Data buffer was too short");
+    }
+}
+fn handle_perf_lost_event(cpu: i32, count: u64) {
+    eprintln!("Lost {count} events on CPU {cpu}"); 
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let opts = Command::parse();
@@ -233,6 +279,21 @@ async fn main() -> Result<()> {
     println!("TC eggress hook started");
     xdp_prog.attach()?;
     println!("XDP hook started");
+
+
+    let perf = PerfBufferBuilder::new(&skel.maps.tls_sni_signaling_map)
+        .sample_cb(handle_perf_event)
+        .lost_cb(handle_perf_lost_event)
+        .build()?;
+
+    let thread = std::thread::spawn(move || {
+        loop {
+            if let Err(err) = perf.poll(Duration::from_millis(1000)) {
+                println!("Poll error {}", anyhow!(err));
+            }
+        }
+    });
+
 
     println!("Awaiting for Ctrl-C");
     signal::ctrl_c().await?;
