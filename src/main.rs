@@ -22,6 +22,7 @@ use libbpf_rs::OpenObject;
 use libbpf_rs::PerfBufferBuilder;
 use libbpf_rs::XdpFlags;
 use plain::Plain;
+use regex::Regex;
 use tokio::signal;
 
 use clap::Parser;
@@ -214,11 +215,16 @@ impl<'obj> DpitSkel<'obj> {
     }
 }
 
+lazy_static::lazy_static! {
+    static ref DOMAIN_REGEX: Regex = 
+        Regex::new(r"^[A-Za-z0-9.-]+$").unwrap();
+}
+
 unsafe impl Plain for tls_sni_signaling {}
 
-fn process_perf_signal(sni_tls_data: &tls_sni_signaling) -> Result<()> {
+fn sni_tls_get_domain(sni_tls_data: &tls_sni_signaling) -> 
+    Result<Option<String>> {
     let sni_type = unsafe { sni_tls_data.sni_type.assume_init() };
-    let act = unsafe { sni_tls_data.act.assume_init() };
     
     if let chlo_tls_atype::SNI_FOUND = sni_type  {
         let sni_data = sni_tls_data.sni_data;
@@ -232,10 +238,27 @@ fn process_perf_signal(sni_tls_data: &tls_sni_signaling) -> Result<()> {
         let sni_buf = &sni_buf[..sni_len as usize];
         let sni_rvbuf: Vec<u8> = sni_buf.iter().rev().cloned().collect();
         let s = std::str::from_utf8(&sni_rvbuf)?;
+        if !DOMAIN_REGEX.is_match(s) {
+            return Err(anyhow!("domain does not match regex"));
+        }
 
-        println!("SNI found: {} of len {}", s, sni_len);
+        return Ok(Some(String::from(s)));
     }
+
+    Ok(None)
+}
+
+fn process_perf_signal(sni_tls_data: &tls_sni_signaling) -> Result<()> {
+    let sni_type = unsafe { sni_tls_data.sni_type.assume_init() };
+    let act = unsafe { sni_tls_data.act.assume_init() };
+
+    let domain = sni_tls_get_domain(sni_tls_data)?;
+
     println!("Type: {:?}, Action: {:?}", sni_type, act); 
+
+    if let Some(domain) = &domain {
+        println!("SNI found: {} of len {}", domain, domain.len());
+    }
 
     Ok(())
 }
@@ -262,31 +285,59 @@ async fn main() -> Result<()> {
     let mut open_object = MaybeUninit::uninit();
     let skel = init_skel(&mut open_object)?;
 
-    let tc_controller = TcController::new(skel.progs.handle_tc.as_fd(), opts.iface.as_str())?;
-    let xdp_prog = XdpController::new(skel.progs.handle_xdp.as_fd(), opts.iface.as_str())?;
+    let mut ifaces = Vec::<String>::new();
+    for iface in opts.iface.split(',') {
+        if iface.len() == 0 {
+            continue
+        }
+
+        ifaces.push(String::from(iface));
+    }
+
+    let tc_controllers: Vec<(Result<TcController>, String)> = 
+        ifaces.iter().map(
+            |iface| (
+                TcController::new(skel.progs.handle_tc.as_fd(), iface.as_str()), 
+                iface.clone())
+        ).collect();
+
+    let xdp_progs: Vec<(Result<XdpController>, String)> = 
+        ifaces.iter().map(|iface| (
+            XdpController::new(skel.progs.handle_xdp.as_fd(), iface.as_str()), 
+            iface.clone())
+        ).collect();
 
     for domain in opts.block_domains.split(',') {
         if domain.len() == 0 {
             continue
         }
 
-        println!("Add {domain}");
+        println!("Register blocking domain {domain}");
 
         skel.sni_lpm_add_entry(domain, sni_action::SNI_BLOCK)?;
     }
     
-    tc_controller.attach()?;
-    println!("TC eggress hook started");
-    xdp_prog.attach()?;
-    println!("XDP hook started");
+    for tc_controller in &tc_controllers {
+        let tcc = tc_controller.0.as_ref().unwrap();
+        let tc_iface = &tc_controller.1;
 
+        println!("Attaching TC hook to {}", tc_iface);
+        tcc.attach()?;
+    }
+    for xdp_prog in &xdp_progs {
+        let xdpp = xdp_prog.0.as_ref().unwrap();
+        let xdp_iface = &xdp_prog.1;
+
+        println!("Attaching XDP hook to {}", xdp_iface);
+        xdpp.attach()?;
+    }
 
     let perf = PerfBufferBuilder::new(&skel.maps.tls_sni_signaling_map)
         .sample_cb(handle_perf_event)
         .lost_cb(handle_perf_lost_event)
         .build()?;
 
-    let thread = std::thread::spawn(move || {
+    let _thread = std::thread::spawn(move || {
         loop {
             if let Err(err) = perf.poll(Duration::from_millis(1000)) {
                 println!("Poll error {}", anyhow!(err));
