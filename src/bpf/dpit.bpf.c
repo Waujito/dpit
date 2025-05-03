@@ -127,6 +127,10 @@ static __inline enum pkt_action handle_pkt(struct pkt pkt)
 SEC("classifier")
 int handle_tc(struct __sk_buff *skb) 
 {
+	if ((skb->mark & RAWSOCKET_MARK) == RAWSOCKET_MARK) {
+		return TC_ACT_UNSPEC;
+	}
+
 	struct pkt pkt = {
 		.skb = skb,
 		.type = SKB_PKT
