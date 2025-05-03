@@ -196,7 +196,7 @@ if (pkt.type == SKB_PKT) {				\
  */
 static __inline int pkt_read_u8(struct pkt pkt, u32 offset, u8 *dst) {
 	int ret;
-	u8 c = 0;
+	u8 c;
 
 	if (pkt.type == CT_PKT) {
 		asm volatile(
@@ -207,9 +207,10 @@ static __inline int pkt_read_u8(struct pkt pkt, u32 offset, u8 *dst) {
 			"r1 += %[offset]\n\t"
 			"%[ret] = 0\n\t"
 			"%[c] = *(u8 *)(r1 + 0)\n\t"
-			"goto +1\n\t"
+			"goto +2\n\t"
 			".cte_%=:\n\t"
 			"%[ret] = 1\n\t"
+			"%[c] = 0\n\t"
 			: [ret]"=r"(ret),
 			  [c]"=r"(c)
 			: [bsz]"i"(CT_SEQ_WINSIZE),

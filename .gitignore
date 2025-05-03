@@ -13,6 +13,7 @@ Module.symvers
 *.so
 *.ko
 *.a
+.swp
 
 !/.github
 

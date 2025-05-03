@@ -160,10 +160,11 @@ struct {
 static __inline int read_tls_record_header(struct pkt pkt, u32 *offset, struct tls_rec_header *hdr) {
 	int ret = 0;
 	u32 toffset = *offset;
-	struct tls_rec_headers shdr;
-	u8 *rbuf = (u8 *)&shdr;
+	u8 rbuf[5];
+	// struct tls_rec_headers shdr;
+	// u8 *rbuf = (u8 *)&shdr;
 
-	for (int i = 0; i < sizeof(struct tls_rec_headers); i++) {
+	for (int i = 0; i < 5; i++) {
 		ret = pkt_read_u8(pkt, toffset, rbuf + i);
 		if (ret) {
 			return ret;
@@ -171,10 +172,13 @@ static __inline int read_tls_record_header(struct pkt pkt, u32 *offset, struct t
 		toffset += 1;
 	}
 
-	hdr->tls_content_type = shdr.tls_content_type;
-	hdr->tls_vmajor = shdr.tls_vmajor;
-	hdr->tls_vminor = shdr.tls_vminor;
-	hdr->record_length = bpf_ntohs(shdr.record_length);
+	hdr->tls_content_type = rbuf[0];//shdr.tls_content_type;
+	hdr->tls_vmajor = rbuf[1];//shdr.tls_vmajor;
+	hdr->tls_vminor = rbuf[2];//shdr.tls_vminor;
+	hdr->record_length = rbuf[3];
+	hdr->record_length <<= 8;
+	hdr->record_length += rbuf[4];
+	// hdr->record_length = bpf_ntohs(shdr.record_length);
 	// u32 uwu = hdr->record_length;
 	// bpf_tt_printk("Read rec length %d", 23);
 	*offset = toffset;
@@ -508,11 +512,12 @@ static __inline struct sni_tls_anres analyze_tls_record(struct pkt pkt, u32 offs
 			return res;
 		}
 
-		u16 sni_length;
+		u16 sni_length = 0;
 		tls_rch_read_u16(pkt, &offset, &rhdr, &sni_length);
 		if (ret) {
 			return res;
 		}
+
 		sni_length = bpf_ntohs(sni_length);
 		res.sni_length = sni_length;
 		res.type = SNI_FOUND;
