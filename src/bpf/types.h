@@ -129,7 +129,6 @@ struct lnetwork_data {
 	enum lnetwork_type protocol_type;
 	size_t transport_offset;
 	u8 transport_protocol;
-
 	union {
 		struct iphdr iph;
 		struct ipv6hdr ip6h;

@@ -1,13 +1,11 @@
+use libbpf_cargo::SkeletonBuilder;
 use std::env;
 use std::ffi::OsStr;
 use std::path::PathBuf;
-use libbpf_cargo::SkeletonBuilder;
 
 const SRC: &str = "src/bpf/dpit.bpf.c";
 
-
 fn main() {
-
     let out = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set in build script"),
     )
