@@ -8,7 +8,7 @@ license = "GPLv3"
 # libbpf-cargo = { path = "libbpf-rs/libbpf-cargo" }
 #libbpf-cargo = "0.24.8"
 
-libbpf-cargo = { git = "https://github.com/Waujito/libbpf-rs.git", branch = "rel_anon" }
+libbpf-cargo = { git = "https://github.com/libbpf/libbpf-rs.git", rev="c661aa8ec0e48b3e6e75415c6bb35cd28793c897" }
 cargo-emit = "0.2.1"
 vmlinux = { git = "https://github.com/libbpf/vmlinux.h.git" }
 
@@ -17,7 +17,7 @@ anyhow = "1.0"
 # libbpf-rs = { path = "libbpf-rs/libbpf-rs" }
 #libbpf-rs = "0.24.8"
 
-libbpf-rs = { git = "https://github.com/Waujito/libbpf-rs.git", branch = "rel_anon" }
+libbpf-rs = { git = "https://github.com/libbpf/libbpf-rs.git", rev="c661aa8ec0e48b3e6e75415c6bb35cd28793c897" }
 libc = "0.2"
 nix = { version = "0.28", default-features = false, features = ["net", "user"] }
 clap = { version = "4.0.32", default-features = false, features = ["std", "derive", "help", "usage"] }
