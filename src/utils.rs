@@ -4,12 +4,16 @@ use etherparse::{
     UdpHeaderSlice,
 };
 
-use std::{mem, slice};
+use std::{mem, os::fd::{OwnedFd, AsRawFd}, slice};
 
 use crate::ebpf_prog::types::{
     iphdr, ipv6hdr, lnetwork_data, lnetwork_type, ltranposrt_type, ltransport_data, tcphdr, udphdr,
 };
 use regex::Regex;
+
+use nix::sys::socket::{socket, sendto, setsockopt, sockopt, AddressFamily, MsgFlags, SockFlag, SockProtocol, SockType, SockaddrIn, SockaddrIn6, SockaddrLike};
+
+
 
 lazy_static::lazy_static! {
     static ref DOMAIN_REGEX: Regex =
@@ -84,5 +88,67 @@ impl TransportHeaderParse for TransportHeader {
             }
             _ => Err(anyhow!("TransportHeader parse: invalid ltransport_type")),
         }
+    }
+}
+
+pub struct RawSocket {
+    fd_ipv4: OwnedFd,
+    fd_ipv6: OwnedFd,
+}
+
+impl RawSocket {
+    pub fn new(mark: u32) -> Result<Self> {
+        let rawsocket_ipv4 = socket(
+            AddressFamily::Inet, SockType::Raw, SockFlag::SOCK_NONBLOCK, SockProtocol::Raw)?;
+        let rawsocket_ipv6 = socket(
+            AddressFamily::Inet6, SockType::Raw, SockFlag::SOCK_NONBLOCK, SockProtocol::Raw)?;
+
+        setsockopt(&rawsocket_ipv4, sockopt::Mark, &mark)?;
+        setsockopt(&rawsocket_ipv6, sockopt::Mark, &mark)?;
+
+        Ok(Self {
+            fd_ipv4: rawsocket_ipv4,
+            fd_ipv6: rawsocket_ipv6,
+        })
+    }
+
+    pub fn send_ipv4(&self, iph: &Ipv4Header, pkt: &[u8]) -> Result<()> {
+        let daddr = SockaddrIn::new(
+            iph.destination[0],
+            iph.destination[1],
+            iph.destination[2],
+            iph.destination[3],
+            0,
+        );
+
+        let t = sendto(self.fd_ipv4.as_raw_fd(), pkt, &daddr, MsgFlags::MSG_DONTWAIT)?;
+        println!("Sent {t} bytes");
+
+        Ok(())
+    }
+
+    pub fn send_ipv6(&self, ip6h: &Ipv6Header, pkt: &[u8]) -> Result<()> {
+        let daddr = libc::sockaddr_in6 {
+            sin6_family: libc::AF_INET6 as u16,
+            /* Always 0 for raw socket */
+            sin6_port: 0,
+            sin6_addr: libc::in6_addr {
+                s6_addr: ip6h.destination,
+            },
+            sin6_flowinfo: unsafe { mem::zeroed() },
+            sin6_scope_id: unsafe { mem::zeroed() },
+        };
+
+        let daddr = unsafe {
+            SockaddrIn6::from_raw(
+                &daddr as *const libc::sockaddr_in6 as *const libc::sockaddr,
+                None,
+            )
+        }
+        .ok_or(anyhow!("SockaddrIn6 from_raw"))?;
+
+        sendto(self.fd_ipv6.as_raw_fd(), pkt, &daddr, MsgFlags::MSG_DONTWAIT)?;
+
+        Ok(())
     }
 }
