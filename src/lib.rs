@@ -1,3 +1,5 @@
+#![feature(ip_from)]
+
 pub mod utils;
 pub mod ebpf_prog {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/dpit.skel.rs"));

@@ -4,7 +4,7 @@ use etherparse::{
     UdpHeaderSlice,
 };
 
-use std::{mem, os::fd::{OwnedFd, AsRawFd}, slice};
+use std::{mem, net::{IpAddr, Ipv4Addr, Ipv6Addr}, os::fd::{AsRawFd, OwnedFd}, slice};
 
 use crate::ebpf_prog::types::{
     iphdr, ipv6hdr, lnetwork_data, lnetwork_type, ltranposrt_type, ltransport_data, tcphdr, udphdr,
@@ -51,10 +51,30 @@ impl NetworkHeader {
             _ => Err(anyhow!("NetworkHeader parse: invalid lnetwork_type")),
         }
     }
+
+    pub fn saddr(&self) -> IpAddr {
+        match &self {
+            NetworkHeader::Ipv4(ip4h) => 
+                IpAddr::V4(Ipv4Addr::from_octets(ip4h.source)),
+            NetworkHeader::Ipv6(ip6h) =>
+                IpAddr::V6(Ipv6Addr::from_octets(ip6h.source)),
+        }
+    }
+
+    pub fn daddr(&self) -> IpAddr {
+        match &self {
+            NetworkHeader::Ipv4(ip4h) =>
+                IpAddr::V4(Ipv4Addr::from_octets(ip4h.destination)),
+            NetworkHeader::Ipv6(ip6h) =>
+                IpAddr::V6(Ipv6Addr::from_octets(ip6h.destination)),
+        }
+    }
 }
 
 pub trait TransportHeaderParse {
     fn from_ltransport_data(ltd: &ltransport_data) -> Result<TransportHeader>;
+    fn sport(&self) -> u16;
+    fn dport(&self) -> u16;
 }
 impl TransportHeaderParse for TransportHeader {
     fn from_ltransport_data(ltd: &ltransport_data) -> Result<Self> {
@@ -87,6 +107,22 @@ impl TransportHeaderParse for TransportHeader {
                 Ok(TransportHeader::Udp(udphdr))
             }
             _ => Err(anyhow!("TransportHeader parse: invalid ltransport_type")),
+        }
+    }
+
+    fn sport(&self) -> u16 {
+        match &self {
+            TransportHeader::Tcp(tcph) => tcph.source_port,
+            TransportHeader::Udp(udph) => udph.source_port,
+            _ => 0
+        }
+    }
+
+    fn dport(&self) -> u16 {
+        match &self {
+            TransportHeader::Tcp(tcph) => tcph.destination_port,
+            TransportHeader::Udp(udph) => udph.destination_port,
+            _ => 0
         }
     }
 }
@@ -150,5 +186,40 @@ impl RawSocket {
         sendto(self.fd_ipv6.as_raw_fd(), pkt, &daddr, MsgFlags::MSG_DONTWAIT)?;
 
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum NetworkActivityType {
+    TcpSni,
+    TcpSniOverwrite,
+    None
+}
+#[derive(Debug)]
+pub enum NetworkActivityAction {
+    Drop,
+    Accept
+}
+
+#[derive(Debug)]
+pub struct NetworkActivityLogData {
+    pub saddr: IpAddr,
+    pub daddr: IpAddr,
+    pub sport: u16,
+    pub dport: u16,
+    pub sni_name: Option<String>,
+    pub atype: NetworkActivityType,
+    pub action: NetworkActivityAction
+}
+
+pub trait NetworkActivityLogger {
+    fn post(&self, data: &NetworkActivityLogData);
+}
+
+pub struct NActStdoutLogger ();
+
+impl NetworkActivityLogger for NActStdoutLogger {
+    fn post(&self, data: &NetworkActivityLogData) {
+        println!("{:?}", data);
     }
 }

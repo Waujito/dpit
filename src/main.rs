@@ -6,8 +6,7 @@ use std::os::unix::io::AsFd as _;
 use anyhow::{Context, Result};
 
 use ebpf_dpit::{
-    ebpf_prog, sni_logging_handle, DpitSkelLib, init_skel,
-    TcController, XdpController
+    ebpf_prog, init_skel, sni_logging_handle::{self, SniLoggingCtx}, DpitSkelLib, TcController, XdpController
 };
 
 use ebpf_prog::types::sni_action;
@@ -94,7 +93,9 @@ async fn main() -> Result<()> {
         xdpp.attach()?;
     }
 
-    init_sni_logging(&skel).context("Init SNI logging")?;
+    let _logging_thr = init_sni_logging(SniLoggingCtx {
+        skel: &skel
+    }).context("Init SNI logging")?;
 
     println!("Awaiting for Ctrl-C");
     signal::ctrl_c().await?;

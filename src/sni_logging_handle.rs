@@ -8,7 +8,7 @@ use crate::{
         self,
         types::{chlo_tls_atype, sni_action, tls_sni_signaling},
     },
-    utils::{NetworkHeader, TransportHeaderParse, RawSocket},
+    utils::{NActStdoutLogger, NetworkActivityAction, NetworkActivityLogData, NetworkActivityLogger, NetworkActivityType, NetworkHeader, RawSocket, TransportHeaderParse},
 };
 use libbpf_rs::PerfBufferBuilder;
 use plain::Plain;
@@ -19,9 +19,20 @@ lazy_static::lazy_static! {
         Regex::new(r"^[A-Za-z0-9.-]+$").unwrap();
 }
 
-pub fn init_sni_logging(skel: &ebpf_prog::DpitSkel) -> Result<JoinHandle<()>> {
+pub struct SniLoggingCtx<'a> {
+    pub skel: &'a ebpf_prog::DpitSkel<'a>,
+}
+
+pub fn init_sni_logging(ctx: SniLoggingCtx) -> Result<JoinHandle<()>> {
+    let skel = ctx.skel;
+
     let rawsocket = RawSocket::new(skel.maps.rodata_data.unwrap().RAWSOCKET_MARK as u32)?;
-    let perf_ctx = Arc::new(PerfProcessContext { rawsocket });
+    let stdout_logger = Box::new(NActStdoutLogger {});
+
+    let perf_ctx = Arc::new(PerfProcessContext { 
+        rawsocket, 
+        loggers: vec!(stdout_logger)
+    });
 
     let handle_perf_event = move |_cpu: i32, data: &[u8]| {
         let mut sni_tls_data = tls_sni_signaling::default();
@@ -83,6 +94,7 @@ fn sni_tls_get_domain(sni_tls_data: &tls_sni_signaling) -> Result<Option<String>
 
 struct PerfProcessContext {
     rawsocket: RawSocket,
+    loggers: Vec<Box<dyn NetworkActivityLogger>>
 }
 
 fn process_perf_signal(
@@ -91,22 +103,40 @@ fn process_perf_signal(
 ) -> Result<()> {
     let sni_type = sni_tls_data.sni_type;
     let act = sni_tls_data.act;
-
+    let network_header = NetworkHeader::from_lnetwork_data(&sni_tls_data.lnd)?;
+    let transport_header = TransportHeader::from_ltransport_data(&sni_tls_data.ltd)?;
     let domain = sni_tls_get_domain(sni_tls_data)?;
 
-    println!("Type: {:?}, Action: {:?}", sni_type, act);
+    let log_data = NetworkActivityLogData {
+        saddr: network_header.saddr(),
+        daddr: network_header.daddr(),
+        sport: transport_header.sport(),
+        dport: transport_header.dport(),
+        sni_name: domain.clone(),
+        atype: if sni_type == chlo_tls_atype::SNI_FOUND {
+                NetworkActivityType::TcpSni
+            } else if act == sni_action::SNI_BLOCK_OVERWRITTEN {
+                NetworkActivityType::TcpSniOverwrite
+            } else {
+                NetworkActivityType::None
+            },
+        action: match act {
+            sni_action::SNI_BLOCK | sni_action::SNI_BLOCK_OVERWRITTEN =>
+                NetworkActivityAction::Drop,
+            sni_action::SNI_APPROVE => NetworkActivityAction::Accept,
+            _ => NetworkActivityAction::Accept
+        }
+    };
 
-    if let Some(domain) = &domain {
-        println!("SNI found: {} of len {}", domain, domain.len());
-    }
 
     if act == sni_action::SNI_BLOCK || act == sni_action::SNI_BLOCK_OVERWRITTEN {
-        let network_header = NetworkHeader::from_lnetwork_data(&sni_tls_data.lnd)?;
-        let transport_header = TransportHeader::from_ltransport_data(&sni_tls_data.ltd)?;
-
         if let TransportHeader::Tcp(tcph) = &transport_header {
             let _ = send_bi_tcp_rst(&network_header, tcph, ctx.as_ref());
         }
+    }
+    
+    for logger in &ctx.loggers {
+        logger.post(&log_data);
     }
 
     Ok(())
