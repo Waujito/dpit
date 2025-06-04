@@ -6,11 +6,18 @@ pub mod ebpf_prog {
 }
 pub mod sni_logging_handle;
 
-use ebpf_prog::{types::sni_action, DpitSkel};
 use anyhow::{anyhow, Context, Result};
-use libbpf_rs::{skel::{OpenSkel, SkelBuilder}, MapCore, MapFlags, OpenObject, TcHook, Xdp, XdpFlags, TC_EGRESS};
+use ebpf_prog::{types::sni_action, DpitSkel};
+use libbpf_rs::{
+    skel::{OpenSkel, SkelBuilder},
+    MapCore, MapFlags, OpenObject, TcHook, Xdp, XdpFlags, TC_EGRESS,
+};
 use nix::net::if_::if_nametoindex;
-use std::{cell::{Cell, RefCell}, mem::{self, MaybeUninit}, os::fd::BorrowedFd};
+use std::{
+    cell::{Cell, RefCell},
+    mem::{self, MaybeUninit},
+    os::fd::BorrowedFd,
+};
 
 pub trait DpitSkelLib {
     fn sni_lpm_add_entry(&self, domain: &str, action: sni_action) -> Result<()>;
@@ -179,4 +186,3 @@ impl<'obj> Drop for XdpController<'obj> {
         let _ = self.destroy();
     }
 }
-

@@ -1,14 +1,21 @@
 use anyhow::{anyhow, Result};
 use etherparse::{IpNumber, Ipv4Header, TcpHeader, TransportHeader};
 
-use std::{sync::Arc, thread::JoinHandle, time::Duration};
+use std::{
+    sync::{Mutex, MutexGuard},
+    thread::JoinHandle,
+    time::Duration,
+};
 
 use crate::{
     ebpf_prog::{
         self,
         types::{chlo_tls_atype, sni_action, tls_sni_signaling},
     },
-    utils::{NActStdoutLogger, NetworkActivityAction, NetworkActivityLogData, NetworkActivityLogger, NetworkActivityType, NetworkHeader, RawSocket, TransportHeaderParse},
+    utils::{
+        NActStdoutLogger, NetworkActivityAction, NetworkActivityLogData, NetworkActivityLogger,
+        NetworkActivityType, NetworkHeader, RawSocket, TransportHeaderParse,
+    },
 };
 use libbpf_rs::PerfBufferBuilder;
 use plain::Plain;
@@ -26,20 +33,27 @@ pub struct SniLoggingCtx<'a> {
 pub fn init_sni_logging(ctx: SniLoggingCtx) -> Result<JoinHandle<()>> {
     let skel = ctx.skel;
 
-    let rawsocket = RawSocket::new(skel.maps.rodata_data.unwrap().RAWSOCKET_MARK as u32)?;
+    let rawsocket = RawSocket::new(skel.maps.rodata_data.unwrap().RAWSOCKET_MARK)?;
     let stdout_logger = Box::new(NActStdoutLogger {});
 
-    let perf_ctx = Arc::new(PerfProcessContext { 
-        rawsocket, 
-        loggers: vec!(stdout_logger)
+    let perf_ctx = Mutex::new(PerfProcessContext {
+        rawsocket,
+        loggers: vec![stdout_logger],
     });
 
     let handle_perf_event = move |_cpu: i32, data: &[u8]| {
         let mut sni_tls_data = tls_sni_signaling::default();
         let res = plain::copy_from_bytes(&mut sni_tls_data, data);
+        let perf_ref = match perf_ctx.lock() {
+            Ok(pf) => pf,
+            Err(err) => {
+                eprintln!("Mutex acquire error: {err}");
+                return;
+            }
+        };
+
         if res.is_ok() {
-            let perf_cl = perf_ctx.clone();
-            if let Err(err) = process_perf_signal(&sni_tls_data, perf_cl) {
+            if let Err(err) = process_perf_signal(&sni_tls_data, &perf_ref) {
                 eprintln!("handle_event error: {}", anyhow!(err));
             }
         } else {
@@ -94,12 +108,12 @@ fn sni_tls_get_domain(sni_tls_data: &tls_sni_signaling) -> Result<Option<String>
 
 struct PerfProcessContext {
     rawsocket: RawSocket,
-    loggers: Vec<Box<dyn NetworkActivityLogger>>
+    loggers: Vec<Box<dyn NetworkActivityLogger>>,
 }
 
 fn process_perf_signal(
     sni_tls_data: &tls_sni_signaling,
-    ctx: Arc<PerfProcessContext>,
+    ctx: &MutexGuard<'_, PerfProcessContext>,
 ) -> Result<()> {
     let sni_type = sni_tls_data.sni_type;
     let act = sni_tls_data.act;
@@ -114,27 +128,27 @@ fn process_perf_signal(
         dport: transport_header.dport(),
         sni_name: domain.clone(),
         atype: if sni_type == chlo_tls_atype::SNI_FOUND {
-                NetworkActivityType::TcpSni
-            } else if act == sni_action::SNI_BLOCK_OVERWRITTEN {
-                NetworkActivityType::TcpSniOverwrite
-            } else {
-                NetworkActivityType::None
-            },
+            NetworkActivityType::TcpSni
+        } else if act == sni_action::SNI_BLOCK_OVERWRITTEN {
+            NetworkActivityType::TcpSniOverwrite
+        } else {
+            NetworkActivityType::None
+        },
         action: match act {
-            sni_action::SNI_BLOCK | sni_action::SNI_BLOCK_OVERWRITTEN =>
-                NetworkActivityAction::Drop,
+            sni_action::SNI_BLOCK | sni_action::SNI_BLOCK_OVERWRITTEN => {
+                NetworkActivityAction::Drop
+            }
             sni_action::SNI_APPROVE => NetworkActivityAction::Accept,
-            _ => NetworkActivityAction::Accept
-        }
+            _ => NetworkActivityAction::Accept,
+        },
     };
-
 
     if act == sni_action::SNI_BLOCK || act == sni_action::SNI_BLOCK_OVERWRITTEN {
         if let TransportHeader::Tcp(tcph) = &transport_header {
-            let _ = send_bi_tcp_rst(&network_header, tcph, ctx.as_ref());
+            let _ = send_bi_tcp_rst(&network_header, tcph, ctx);
         }
     }
-    
+
     for logger in &ctx.loggers {
         logger.post(&log_data);
     }
@@ -145,7 +159,7 @@ fn process_perf_signal(
 fn send_bi_tcp_rst(
     network_hdr: &NetworkHeader,
     otcph: &TcpHeader,
-    ctx: &PerfProcessContext,
+    ctx: &MutexGuard<'_, PerfProcessContext>,
 ) -> Result<()> {
     let mut tcph = TcpHeader::new(
         otcph.source_port,

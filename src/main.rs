@@ -6,7 +6,9 @@ use std::os::unix::io::AsFd as _;
 use anyhow::{Context, Result};
 
 use ebpf_dpit::{
-    ebpf_prog, init_skel, sni_logging_handle::{self, SniLoggingCtx}, DpitSkelLib, TcController, XdpController
+    ebpf_prog, init_skel,
+    sni_logging_handle::{self, SniLoggingCtx},
+    DpitSkelLib, TcController, XdpController,
 };
 
 use ebpf_prog::types::sni_action;
@@ -82,20 +84,19 @@ async fn main() -> Result<()> {
         let tcc = tc_controller.0.as_ref().unwrap();
         let tc_iface = &tc_controller.1;
 
-        println!("Attaching TC hook to {}", tc_iface);
+        println!("Attaching TC hook to {tc_iface}");
         tcc.attach()?;
     }
     for xdp_prog in &xdp_progs {
         let xdpp = xdp_prog.0.as_ref().unwrap();
         let xdp_iface = &xdp_prog.1;
 
-        println!("Attaching XDP hook to {}", xdp_iface);
+        println!("Attaching XDP hook to {xdp_iface}");
         xdpp.attach()?;
     }
 
-    let _logging_thr = init_sni_logging(SniLoggingCtx {
-        skel: &skel
-    }).context("Init SNI logging")?;
+    let _logging_thr =
+        init_sni_logging(SniLoggingCtx { skel: &skel }).context("Init SNI logging")?;
 
     println!("Awaiting for Ctrl-C");
     signal::ctrl_c().await?;

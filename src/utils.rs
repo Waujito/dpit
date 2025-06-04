@@ -4,16 +4,22 @@ use etherparse::{
     UdpHeaderSlice,
 };
 
-use std::{mem, net::{IpAddr, Ipv4Addr, Ipv6Addr}, os::fd::{AsRawFd, OwnedFd}, slice};
+use std::{
+    mem,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::fd::{AsRawFd, OwnedFd},
+    slice,
+};
 
 use crate::ebpf_prog::types::{
     iphdr, ipv6hdr, lnetwork_data, lnetwork_type, ltranposrt_type, ltransport_data, tcphdr, udphdr,
 };
 use regex::Regex;
 
-use nix::sys::socket::{socket, sendto, setsockopt, sockopt, AddressFamily, MsgFlags, SockFlag, SockProtocol, SockType, SockaddrIn, SockaddrIn6, SockaddrLike};
-
-
+use nix::sys::socket::{
+    sendto, setsockopt, socket, sockopt, AddressFamily, MsgFlags, SockFlag, SockProtocol, SockType,
+    SockaddrIn, SockaddrIn6, SockaddrLike,
+};
 
 lazy_static::lazy_static! {
     static ref DOMAIN_REGEX: Regex =
@@ -54,19 +60,15 @@ impl NetworkHeader {
 
     pub fn saddr(&self) -> IpAddr {
         match &self {
-            NetworkHeader::Ipv4(ip4h) => 
-                IpAddr::V4(Ipv4Addr::from_octets(ip4h.source)),
-            NetworkHeader::Ipv6(ip6h) =>
-                IpAddr::V6(Ipv6Addr::from_octets(ip6h.source)),
+            NetworkHeader::Ipv4(ip4h) => IpAddr::V4(Ipv4Addr::from_octets(ip4h.source)),
+            NetworkHeader::Ipv6(ip6h) => IpAddr::V6(Ipv6Addr::from_octets(ip6h.source)),
         }
     }
 
     pub fn daddr(&self) -> IpAddr {
         match &self {
-            NetworkHeader::Ipv4(ip4h) =>
-                IpAddr::V4(Ipv4Addr::from_octets(ip4h.destination)),
-            NetworkHeader::Ipv6(ip6h) =>
-                IpAddr::V6(Ipv6Addr::from_octets(ip6h.destination)),
+            NetworkHeader::Ipv4(ip4h) => IpAddr::V4(Ipv4Addr::from_octets(ip4h.destination)),
+            NetworkHeader::Ipv6(ip6h) => IpAddr::V6(Ipv6Addr::from_octets(ip6h.destination)),
         }
     }
 }
@@ -114,7 +116,7 @@ impl TransportHeaderParse for TransportHeader {
         match &self {
             TransportHeader::Tcp(tcph) => tcph.source_port,
             TransportHeader::Udp(udph) => udph.source_port,
-            _ => 0
+            _ => 0,
         }
     }
 
@@ -122,7 +124,7 @@ impl TransportHeaderParse for TransportHeader {
         match &self {
             TransportHeader::Tcp(tcph) => tcph.destination_port,
             TransportHeader::Udp(udph) => udph.destination_port,
-            _ => 0
+            _ => 0,
         }
     }
 }
@@ -135,9 +137,17 @@ pub struct RawSocket {
 impl RawSocket {
     pub fn new(mark: u32) -> Result<Self> {
         let rawsocket_ipv4 = socket(
-            AddressFamily::Inet, SockType::Raw, SockFlag::SOCK_NONBLOCK, SockProtocol::Raw)?;
+            AddressFamily::Inet,
+            SockType::Raw,
+            SockFlag::SOCK_NONBLOCK,
+            SockProtocol::Raw,
+        )?;
         let rawsocket_ipv6 = socket(
-            AddressFamily::Inet6, SockType::Raw, SockFlag::SOCK_NONBLOCK, SockProtocol::Raw)?;
+            AddressFamily::Inet6,
+            SockType::Raw,
+            SockFlag::SOCK_NONBLOCK,
+            SockProtocol::Raw,
+        )?;
 
         setsockopt(&rawsocket_ipv4, sockopt::Mark, &mark)?;
         setsockopt(&rawsocket_ipv6, sockopt::Mark, &mark)?;
@@ -157,7 +167,12 @@ impl RawSocket {
             0,
         );
 
-        let t = sendto(self.fd_ipv4.as_raw_fd(), pkt, &daddr, MsgFlags::MSG_DONTWAIT)?;
+        let t = sendto(
+            self.fd_ipv4.as_raw_fd(),
+            pkt,
+            &daddr,
+            MsgFlags::MSG_DONTWAIT,
+        )?;
         println!("Sent {t} bytes");
 
         Ok(())
@@ -183,7 +198,12 @@ impl RawSocket {
         }
         .ok_or(anyhow!("SockaddrIn6 from_raw"))?;
 
-        sendto(self.fd_ipv6.as_raw_fd(), pkt, &daddr, MsgFlags::MSG_DONTWAIT)?;
+        sendto(
+            self.fd_ipv6.as_raw_fd(),
+            pkt,
+            &daddr,
+            MsgFlags::MSG_DONTWAIT,
+        )?;
 
         Ok(())
     }
@@ -193,12 +213,12 @@ impl RawSocket {
 pub enum NetworkActivityType {
     TcpSni,
     TcpSniOverwrite,
-    None
+    None,
 }
 #[derive(Debug)]
 pub enum NetworkActivityAction {
     Drop,
-    Accept
+    Accept,
 }
 
 #[derive(Debug)]
@@ -209,17 +229,17 @@ pub struct NetworkActivityLogData {
     pub dport: u16,
     pub sni_name: Option<String>,
     pub atype: NetworkActivityType,
-    pub action: NetworkActivityAction
+    pub action: NetworkActivityAction,
 }
 
 pub trait NetworkActivityLogger {
     fn post(&self, data: &NetworkActivityLogData);
 }
 
-pub struct NActStdoutLogger ();
+pub struct NActStdoutLogger();
 
 impl NetworkActivityLogger for NActStdoutLogger {
     fn post(&self, data: &NetworkActivityLogData) {
-        println!("{:?}", data);
+        println!("{data:?}");
     }
 }
