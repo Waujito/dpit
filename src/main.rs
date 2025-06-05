@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 
 use ebpf_dpit::{
     ebpf_prog, init_skel,
+    postgres_logger::NActPostgresLogger,
     sni_logging_handle::{self, SniLoggingCtx},
     DpitSkelLib, TcController, XdpController,
 };
@@ -32,6 +33,12 @@ struct Command {
     /// `gle.com` including)
     #[arg(default_value = "", short = 'd', long = "block-domains")]
     block_domains: String,
+
+    /// Postgresql logger connection URI
+    /// The table network_acitivity with following types is created
+    /// on the first run by default.
+    #[arg(long = "postgres")]
+    postgres_connstring: Option<String>,
 }
 
 #[tokio::main]
@@ -49,6 +56,21 @@ async fn main() -> Result<()> {
 
         ifaces.push(String::from(iface));
     }
+
+    let postgres = if let Some(postgres_connstring) = &opts.postgres_connstring {
+        let postgres_connstring = String::from(postgres_connstring);
+        let postgres_logger = tokio::task::spawn_blocking(move || -> Result<NActPostgresLogger> {
+            let pgs = NActPostgresLogger::new(postgres_connstring.as_ref())?;
+            pgs.init_database_tables()?;
+
+            Ok(pgs)
+        })
+        .await??;
+
+        Some(postgres_logger)
+    } else {
+        None
+    };
 
     let tc_controllers: Vec<(Result<TcController>, String)> = ifaces
         .iter()
@@ -95,8 +117,11 @@ async fn main() -> Result<()> {
         xdpp.attach()?;
     }
 
-    let _logging_thr =
-        init_sni_logging(SniLoggingCtx { skel: &skel }).context("Init SNI logging")?;
+    let _logging_thr = init_sni_logging(SniLoggingCtx {
+        skel: &skel,
+        postgres_logger: postgres,
+    })
+    .context("Init SNI logging")?;
 
     println!("Awaiting for Ctrl-C");
     signal::ctrl_c().await?;

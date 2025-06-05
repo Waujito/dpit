@@ -209,19 +209,19 @@ impl RawSocket {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NetworkActivityType {
     TcpSni,
     TcpSniOverwrite,
     None,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NetworkActivityAction {
     Drop,
     Accept,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NetworkActivityLogData {
     pub saddr: IpAddr,
     pub daddr: IpAddr,
@@ -233,13 +233,14 @@ pub struct NetworkActivityLogData {
 }
 
 pub trait NetworkActivityLogger {
-    fn post(&self, data: &NetworkActivityLogData);
+    fn post(&self, data: &NetworkActivityLogData) -> Result<()>;
 }
 
 pub struct NActStdoutLogger();
 
 impl NetworkActivityLogger for NActStdoutLogger {
-    fn post(&self, data: &NetworkActivityLogData) {
+    fn post(&self, data: &NetworkActivityLogData) -> Result<()> {
         println!("{data:?}");
+        Ok(())
     }
 }

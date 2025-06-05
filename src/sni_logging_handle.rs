@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use etherparse::{IpNumber, Ipv4Header, TcpHeader, TransportHeader};
 
 use std::{
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     thread::JoinHandle,
     time::Duration,
 };
@@ -12,6 +12,7 @@ use crate::{
         self,
         types::{chlo_tls_atype, sni_action, tls_sni_signaling},
     },
+    postgres_logger::NActPostgresLogger,
     utils::{
         NActStdoutLogger, NetworkActivityAction, NetworkActivityLogData, NetworkActivityLogger,
         NetworkActivityType, NetworkHeader, RawSocket, TransportHeaderParse,
@@ -28,32 +29,40 @@ lazy_static::lazy_static! {
 
 pub struct SniLoggingCtx<'a> {
     pub skel: &'a ebpf_prog::DpitSkel<'a>,
+    pub postgres_logger: Option<NActPostgresLogger>,
 }
+
+struct PerfProcessContext {
+    rawsocket: Mutex<RawSocket>,
+    loggers: Vec<Mutex<Box<dyn NetworkActivityLogger>>>,
+}
+
+unsafe impl Send for PerfProcessContext {}
+unsafe impl Sync for PerfProcessContext {}
 
 pub fn init_sni_logging(ctx: SniLoggingCtx) -> Result<JoinHandle<()>> {
     let skel = ctx.skel;
 
     let rawsocket = RawSocket::new(skel.maps.rodata_data.unwrap().RAWSOCKET_MARK)?;
-    let stdout_logger = Box::new(NActStdoutLogger {});
+    let stdout_logger: Box<dyn NetworkActivityLogger> = Box::new(NActStdoutLogger {});
 
-    let perf_ctx = Mutex::new(PerfProcessContext {
-        rawsocket,
-        loggers: vec![stdout_logger],
-    });
+    let mut perf_ctx = PerfProcessContext {
+        rawsocket: Mutex::new(rawsocket),
+        loggers: vec![Mutex::new(stdout_logger)],
+    };
+
+    if let Some(pgs) = ctx.postgres_logger {
+        perf_ctx.loggers.push(Mutex::new(Box::new(pgs)));
+    }
+
+    let perf_ctx = Arc::new(perf_ctx);
 
     let handle_perf_event = move |_cpu: i32, data: &[u8]| {
         let mut sni_tls_data = tls_sni_signaling::default();
         let res = plain::copy_from_bytes(&mut sni_tls_data, data);
-        let perf_ref = match perf_ctx.lock() {
-            Ok(pf) => pf,
-            Err(err) => {
-                eprintln!("Mutex acquire error: {err}");
-                return;
-            }
-        };
 
         if res.is_ok() {
-            if let Err(err) = process_perf_signal(&sni_tls_data, &perf_ref) {
+            if let Err(err) = process_perf_signal(&sni_tls_data, perf_ctx.as_ref()) {
                 eprintln!("handle_event error: {}", anyhow!(err));
             }
         } else {
@@ -106,15 +115,7 @@ fn sni_tls_get_domain(sni_tls_data: &tls_sni_signaling) -> Result<Option<String>
     Ok(None)
 }
 
-struct PerfProcessContext {
-    rawsocket: RawSocket,
-    loggers: Vec<Box<dyn NetworkActivityLogger>>,
-}
-
-fn process_perf_signal(
-    sni_tls_data: &tls_sni_signaling,
-    ctx: &MutexGuard<'_, PerfProcessContext>,
-) -> Result<()> {
+fn process_perf_signal(sni_tls_data: &tls_sni_signaling, ctx: &PerfProcessContext) -> Result<()> {
     let sni_type = sni_tls_data.sni_type;
     let act = sni_tls_data.act;
     let network_header = NetworkHeader::from_lnetwork_data(&sni_tls_data.lnd)?;
@@ -150,7 +151,7 @@ fn process_perf_signal(
     }
 
     for logger in &ctx.loggers {
-        logger.post(&log_data);
+        logger.lock().unwrap().post(&log_data)?;
     }
 
     Ok(())
@@ -159,7 +160,7 @@ fn process_perf_signal(
 fn send_bi_tcp_rst(
     network_hdr: &NetworkHeader,
     otcph: &TcpHeader,
-    ctx: &MutexGuard<'_, PerfProcessContext>,
+    ctx: &PerfProcessContext,
 ) -> Result<()> {
     let mut tcph = TcpHeader::new(
         otcph.source_port,
@@ -169,6 +170,7 @@ fn send_bi_tcp_rst(
     );
     tcph.rst = true;
     tcph.acknowledgment_number = otcph.acknowledgment_number;
+    let rawsocket = ctx.rawsocket.lock().unwrap();
 
     if let NetworkHeader::Ipv4(oiph) = network_hdr {
         let mut iph = Ipv4Header::new(
@@ -185,7 +187,7 @@ fn send_bi_tcp_rst(
         let mut sent_packet = iph.to_bytes().to_vec();
         sent_packet.extend(tcph.to_bytes());
 
-        ctx.rawsocket.send_ipv4(&iph, &sent_packet[..])?;
+        rawsocket.send_ipv4(&iph, &sent_packet[..])?;
 
         iph.destination = iph.source;
         iph.source = oiph.destination;
@@ -202,7 +204,7 @@ fn send_bi_tcp_rst(
         let mut sent_packet = iph.to_bytes().to_vec();
         sent_packet.extend(tcph.to_bytes());
 
-        ctx.rawsocket.send_ipv4(&iph, &sent_packet[..])?;
+        rawsocket.send_ipv4(&iph, &sent_packet[..])?;
     } else if let NetworkHeader::Ipv6(oiph) = network_hdr {
         let mut iph = oiph.clone();
         iph.hop_limit = 128;
@@ -214,7 +216,7 @@ fn send_bi_tcp_rst(
         let mut sent_packet = iph.to_bytes().to_vec();
         sent_packet.extend(tcph.to_bytes());
 
-        ctx.rawsocket.send_ipv6(&iph, &sent_packet[..])?;
+        rawsocket.send_ipv6(&iph, &sent_packet[..])?;
 
         iph.destination = iph.source;
         iph.source = oiph.destination;
@@ -230,7 +232,7 @@ fn send_bi_tcp_rst(
         let mut sent_packet = iph.to_bytes().to_vec();
         sent_packet.extend(tcph.to_bytes());
 
-        ctx.rawsocket.send_ipv6(&iph, &sent_packet[..])?;
+        rawsocket.send_ipv6(&iph, &sent_packet[..])?;
     }
 
     Ok(())

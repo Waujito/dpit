@@ -4,6 +4,7 @@ pub mod utils;
 pub mod ebpf_prog {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/dpit.skel.rs"));
 }
+pub mod postgres_logger;
 pub mod sni_logging_handle;
 
 use anyhow::{anyhow, Context, Result};
