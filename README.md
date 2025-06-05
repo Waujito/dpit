@@ -11,3 +11,5 @@ sudo cat /sys/kernel/debug/tracing/trace_pipe
 ```
 
 Note, that this command produces the logs in real time, you don't want to restart it each time for update.
+
+Implements SNI logging with stdout and PostgreSQL.
