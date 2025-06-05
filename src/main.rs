@@ -39,6 +39,10 @@ struct Command {
     /// on the first run by default.
     #[arg(long = "postgres")]
     postgres_connstring: Option<String>,
+
+    /// Same as --postgres, but reads connection string from POSTGRES_URI environment variable
+    #[arg(long = "postgres_env")]
+    postgres_toggler: bool,
 }
 
 #[tokio::main]
@@ -57,8 +61,13 @@ async fn main() -> Result<()> {
         ifaces.push(String::from(iface));
     }
 
-    let postgres = if let Some(postgres_connstring) = &opts.postgres_connstring {
-        let postgres_connstring = String::from(postgres_connstring);
+    let mut postgres_connstring = opts.postgres_connstring;
+    if opts.postgres_toggler {
+        let postgres_uri = std::env::var("POSTGRES_URI").context("POSTGRES_URI env")?;
+        postgres_connstring = Some(postgres_uri);
+    }
+
+    let postgres = if let Some(postgres_connstring) = postgres_connstring {
         let postgres_logger = tokio::task::spawn_blocking(move || -> Result<NActPostgresLogger> {
             let pgs = NActPostgresLogger::new(postgres_connstring.as_ref())?;
             pgs.init_database_tables()?;
