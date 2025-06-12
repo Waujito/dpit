@@ -96,7 +96,7 @@ static __inline int exchange_tls_flags(struct packet_data *pktd, struct ct_value
 	int ret;
 	struct pkt pkt = pktd->pkt;
 	if (pktd->ltd.transport_type != TCP) {
-		unreachable;
+		return -1;
 	}
 
 	u32 seq = bpf_ntohl(pktd->ltd.tcph.seq);
@@ -151,7 +151,7 @@ static __inline int exchange_tls_flags(struct packet_data *pktd, struct ct_value
 struct {
         __uint(type, BPF_MAP_TYPE_LPM_TRIE);
         __type(key, struct sni_buf);
-        __type(value, enum sni_action);
+        __type(value, enum pkt_action);
         __uint(map_flags, BPF_F_NO_PREALLOC);
         __uint(max_entries, 255);
 } sni_lpm_map SEC(".maps");
@@ -537,7 +537,7 @@ struct tls_sni_signaling {
 	struct ltransport_data ltd;
 	enum chlo_tls_atype sni_type;
 	struct sni_buf sni_data;
-	enum sni_action act;
+	enum pkt_action act;
 };
 
 struct {
@@ -558,8 +558,8 @@ struct {
 
 static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *pktd, u32 offset) {
 	int ret;
-	enum sni_action act;
-	act = SNI_APPROVE;
+	enum pkt_action act;
+	act = PKT_ACT_PASS;
 	struct sni_buf *sni_tbuf = NULL;
 
 	struct sni_tls_anres chres = analyze_tls_record(pkt, offset);
@@ -611,7 +611,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 
 
 		sni_tbuf->prefixlen = (sni_length + 1) * 8;
-		enum sni_action *actp = bpf_map_lookup_elem(&sni_lpm_map, sni_tbuf);
+		enum pkt_action *actp = bpf_map_lookup_elem(&sni_lpm_map, sni_tbuf);
 		if (actp == NULL) {
 			bpf_printk("Action not found");
 		} else {
@@ -639,14 +639,14 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 				(flags & CT_FLAG_TLS_CHLO) == 
 					CT_FLAG_TLS_CHLO) {
 				bpf_tt_printk("TLS CHLO MESSAGE IS OVERWRITTEN");
-				act = SNI_BLOCK_OVERWRITTEN;
+				act = PKT_ACT_DROP_OVERWRITTEN;
 			}
 		}
 	}
 
 	if (	chres.type != SNI_FOUND && 
 		chres.type != SNI_NOT_FOUND &&
-		act == SNI_APPROVE) {
+		act == PKT_ACT_PASS) {
 		return PKT_ACT_CONTINUE;
 	}
 
@@ -686,7 +686,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 			tlssig->sni_data = *sni_tbuf;
 			tlssig->sni_data.prefixlen = chres.sni_length;
 
-			if (act == SNI_BLOCK) {
+			if (act == PKT_ACT_DROP) {
 				bpf_tt_printk("Blocked SNI %s", sni_tbuf->data);
 			}
 		}
@@ -716,11 +716,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 	}
 
 return_verdict:
-	if (act == SNI_BLOCK || act == SNI_BLOCK_OVERWRITTEN) {
-		return PKT_ACT_DROP;
-	} else {
-		return PKT_ACT_PASS;
-	}
+	return act;
 }
 
 #endif /* TLS_H */

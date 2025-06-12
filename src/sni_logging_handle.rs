@@ -10,7 +10,7 @@ use std::{
 use crate::{
     ebpf_prog::{
         self,
-        types::{chlo_tls_atype, sni_action, tls_sni_signaling},
+        types::{chlo_tls_atype, pkt_action, tls_sni_signaling},
     },
     postgres_logger::NActPostgresLogger,
     utils::{
@@ -130,21 +130,22 @@ fn process_perf_signal(sni_tls_data: &tls_sni_signaling, ctx: &PerfProcessContex
         sni_name: domain.clone(),
         atype: if sni_type == chlo_tls_atype::SNI_FOUND {
             NetworkActivityType::TcpSni
-        } else if act == sni_action::SNI_BLOCK_OVERWRITTEN {
+        } else if act == pkt_action::PKT_ACT_DROP_OVERWRITTEN {
             NetworkActivityType::TcpSniOverwrite
         } else {
             NetworkActivityType::None
         },
         action: match act {
-            sni_action::SNI_BLOCK | sni_action::SNI_BLOCK_OVERWRITTEN => {
+            pkt_action::PKT_ACT_DROP | pkt_action::PKT_ACT_DROP_OVERWRITTEN => {
                 NetworkActivityAction::Drop
             }
-            sni_action::SNI_APPROVE => NetworkActivityAction::Accept,
+            pkt_action::PKT_ACT_PASS => NetworkActivityAction::Accept,
             _ => NetworkActivityAction::Accept,
         },
     };
 
-    if act == sni_action::SNI_BLOCK || act == sni_action::SNI_BLOCK_OVERWRITTEN {
+    if act == pkt_action::PKT_ACT_DROP || 
+        act == pkt_action::PKT_ACT_DROP_OVERWRITTEN {
         if let TransportHeader::Tcp(tcph) = &transport_header {
             let _ = send_bi_tcp_rst(&network_header, tcph, ctx);
         }

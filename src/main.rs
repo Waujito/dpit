@@ -12,7 +12,7 @@ use ebpf_dpit::{
     DpitSkelLib, TcController, XdpController,
 };
 
-use ebpf_prog::types::sni_action;
+use ebpf_prog::types::pkt_action;
 use sni_logging_handle::init_sni_logging;
 use tokio::signal;
 
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
 
         println!("Register blocking domain {domain}");
 
-        skel.sni_lpm_add_entry(domain, sni_action::SNI_BLOCK)?;
+        skel.sni_lpm_add_entry(domain, pkt_action::PKT_ACT_DROP)?;
     }
 
     for tc_controller in &tc_controllers {

@@ -118,7 +118,7 @@ static __inline enum pkt_action handle_pkt(struct pkt pkt)
 	}
 
 	if (pktd.ltd.transport_type == TCP) {
-		act = process_tcp(&pktd);
+		act = process_tcp(&pktd, pkt);
 	}
 	
 	return act;

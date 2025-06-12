@@ -55,7 +55,7 @@ struct cbl_cts {
 	u16 urg;
 };
 
-static long copy_ctvs_with_offset_callback(u64 index, void *ctx) {
+static __inline long copy_ctvs_with_offset_callback(u64 index, void *ctx) {
 	struct cbl_cts *cbtx = ctx;	
 	if (index >= cbtx->len) {
 		return 1;
@@ -183,13 +183,13 @@ static __inline int copy_ctvs_with_offset(struct cbl_cts cbts) {
  * you will need to divide it by window later.
  *
  */
-static __inline struct ct_entry build_ct_entry(struct packet_data *pktd) {
+static __inline struct ct_entry build_ct_entry(const struct packet_data *pktd) {
 	struct ct_entry cte = {0};
 	struct ip_entry *ipe = &cte.ipe;
 	struct transport_entry *tpe = &cte.tpe; 
 
 	if (pktd->ltd.transport_type != TCP)
-		unreachable;	
+		unreachable;
 
 	if (pktd->lnd.protocol_type == IPV4) {
 		ipe->ip4saddr = pktd->lnd.iph.saddr;
@@ -203,9 +203,102 @@ static __inline struct ct_entry build_ct_entry(struct packet_data *pktd) {
 
 	tpe->sport = bpf_ntohs(pktd->ltd.tcph.source);
 	tpe->dport = bpf_ntohs(pktd->ltd.tcph.dest);
-	tpe->seq_hash = seq;
+	tpe->seq_hash = seq;	
 
 	return cte;
+}
+
+#define FCT_SEQ_WINSIZE 32768
+/**
+ * Ct entry for fast action with bigger window.
+ */
+struct fct_value {
+	// Used for early exit if the connection is approved/dropped
+	enum pkt_action fast_action;
+	u64 timestamp;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 20000);
+	__type(key, struct ct_entry);
+	__type(value, struct fct_value);
+} fct_map SEC(".maps");
+
+static __inline enum pkt_action tcp_fct_lookup(struct packet_data *pktd)
+{	
+	int ret;
+	enum pkt_action act;
+
+	if (pktd->ltd.transport_type != TCP)
+		return -1;
+
+	struct ct_entry cte = build_ct_entry(pktd);
+
+	u32 seq = cte.tpe.seq_hash;
+	u32 seqp = seq / FCT_SEQ_WINSIZE;
+	cte.tpe.seq_hash = seqp;
+	
+	// Try to find an existing connection
+	struct fct_value *ctv = bpf_map_lookup_elem(&fct_map, &cte);	
+	if (ctv == NULL) {
+		struct ct_entry ncte = cte;
+		ncte.tpe.seq_hash = seqp - 1;
+		ctv = bpf_map_lookup_elem(&fct_map, &ncte);	
+		if (ctv == NULL) {
+			return PKT_ACT_CONTINUE;
+		}
+
+		// If in the end, slide the window right
+		ret = bpf_map_update_elem(&fct_map, &cte, ctv, BPF_ANY);
+		if (ret) {
+			return PKT_ACT_CONTINUE;
+		}
+
+		bpf_map_delete_elem(&fct_map, &ncte);
+
+		ctv = bpf_map_lookup_elem(&fct_map, &cte);
+		if (ctv == NULL) {
+			return PKT_ACT_CONTINUE;
+		}
+	}
+
+	u64 ktime = bpf_ktime_get_boot_ns();
+	if (	ktime < ctv->timestamp || 
+		(ktime - ctv->timestamp) > 1000 * 1000 * 120) {
+		bpf_map_delete_elem(&fct_map, &cte);
+		return PKT_ACT_CONTINUE;
+	}
+
+	ctv->timestamp = ktime;
+
+	if (ctv->fast_action != PKT_ACT_CONTINUE) {
+		bpf_printk("Fast action %d", ctv->fast_action);
+		return ctv->fast_action;
+	}
+
+	return PKT_ACT_CONTINUE;
+}
+
+static __inline int tcp_fct_insert(struct packet_data *pktd, enum pkt_action act) {
+	int ret;
+	if (pktd->ltd.transport_type != TCP)
+		return -1;
+
+	struct ct_entry cte = build_ct_entry(pktd);
+
+	
+	u32 seq = cte.tpe.seq_hash;
+	u32 seqp = seq / FCT_SEQ_WINSIZE;
+	cte.tpe.seq_hash = seqp;
+
+	u64 ktime = bpf_ktime_get_boot_ns();
+	struct fct_value ctv = {
+		.fast_action = act,
+		.timestamp = ktime,
+	};
+
+	return bpf_map_update_elem(&fct_map, &cte, &ctv, BPF_ANY);
 }
 
 /**
@@ -215,7 +308,7 @@ static __inline void initialize_ct_value(struct ct_value *ctv) {
 	ctv->seq = 0;
 	ctv->fast_action = PKT_ACT_CONTINUE;
 	ctv->chlo_state = MEM_ERROR;
-	ctv->sni_action = SNI_APPROVE;
+	ctv->sni_action = PKT_ACT_PASS;
 	for (int i = 0; i < CT_SEQ_WINSIZE; i++) {
 		// Clang replaces this with memset by default
 		asm volatile(
@@ -233,7 +326,8 @@ static __inline int tcp_ctv_update(struct packet_data *pktd, struct ct_value *ct
 	int ret;
 
 	if (pktd->ltd.transport_type != TCP)
-		unreachable;
+		return -1;
+
 	u32 seq = bpf_ntohl(pktd->ltd.tcph.seq);
 
 	if (ctv->seq >= seq) {
@@ -404,6 +498,9 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 		if (act == PKT_ACT_DROP) {
 			ctv->fast_action = act;
 		}
+		// } else if (act != PKT_ACT_PASS && act != PKT_ACT_CONTINUE) {
+		// 	tcp_fct_insert(pktd, act);
+		// }
 
 		return act;
 
@@ -413,5 +510,6 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 
 	return PKT_ACT_CONTINUE;
 }
+
 
 #endif /* TCP_CT_H */
