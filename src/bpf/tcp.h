@@ -23,15 +23,51 @@
 #include "tls.h"
 #include "tcp_ct.h"
 
-static __inline enum pkt_action process_tcp(struct packet_data *pktd)
+/**
+ * Used to transfer state between tail calls
+ */
+struct {
+        __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+        __type(key, u32);
+        __type(value, struct packet_data);
+        __uint(max_entries, 1);
+} pktd_storage SEC(".maps");
+
+static __inline int tail_tcppct(struct pkt pkt){
+	struct packet_data *ppktd = bpf_map_lookup_elem(&pktd_storage, &PCP_KEY);
+	if (ppktd == NULL) {
+		// should be unreachable
+		bpf_printk("FATAL: Cannot get state packet data");
+		return -1;
+	}
+	struct packet_data pktd = *ppktd;
+	pktd.pkt = pkt;
+
+	if (pktd.ltd.transport_type != TCP) {
+		return -1;
+	}
+
+	enum pkt_action act = tcp_process_conntrack(&pktd);
+
+	return get_return_code(act, pkt.type);
+}
+
+tail_entries(tail_tcppct);
+
+static __inline enum pkt_action process_tcp(struct packet_data *pktd, struct pkt pkt)
 {
+	int ret;
 	enum pkt_action act;
 
-	act = tcp_process_conntrack(pktd);
+	ret = bpf_map_update_elem(&pktd_storage, &PCP_KEY, pktd, BPF_ANY);
+	if (ret) {
+		// Should be unreachable
+		return PKT_ACT_CONTINUE;
+	}
 
-	// u32 offset = pktd->ltd.payload_offset;
-	// act = process_tls(pktd->pkt, offset);
-	return act;
+	ret = call_tail_tcppct(pkt);
+
+	return PKT_ACT_CONTINUE;
 }
 
 #endif /* TCP_H */

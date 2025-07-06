@@ -96,7 +96,7 @@ static __inline int exchange_tls_flags(struct packet_data *pktd, struct ct_value
 	int ret;
 	struct pkt pkt = pktd->pkt;
 	if (pktd->ltd.transport_type != TCP) {
-		unreachable;
+		return -1;
 	}
 
 	u32 seq = bpf_ntohl(pktd->ltd.tcph.seq);

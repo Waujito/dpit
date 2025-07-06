@@ -189,7 +189,7 @@ static __inline struct ct_entry build_ct_entry(struct packet_data *pktd) {
 	struct transport_entry *tpe = &cte.tpe; 
 
 	if (pktd->ltd.transport_type != TCP)
-		unreachable;	
+		unreachable;
 
 	if (pktd->lnd.protocol_type == IPV4) {
 		ipe->ip4saddr = pktd->lnd.iph.saddr;
@@ -233,7 +233,7 @@ static __inline int tcp_ctv_update(struct packet_data *pktd, struct ct_value *ct
 	int ret;
 
 	if (pktd->ltd.transport_type != TCP)
-		unreachable;
+		return -1;
 	u32 seq = bpf_ntohl(pktd->ltd.tcph.seq);
 
 	if (ctv->seq >= seq) {

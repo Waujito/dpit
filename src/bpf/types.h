@@ -71,6 +71,39 @@ enum pkt_action {
 	PKT_ACT_CONTINUE /* Continue in internal program flow */
 };
 
+enum pkt_type {
+	XDP_PKT,
+	SKB_PKT,
+	CT_PKT
+};
+
+struct pkt {
+	enum pkt_type type;
+	union {
+		struct xdp_md *xdp;
+		struct __sk_buff *skb;
+		struct ct_value *ctv;
+	};
+};
+
+static __inline int get_return_code(enum pkt_action act, enum pkt_type pktt) {
+	switch (act) {
+		case PKT_ACT_DROP:
+			bpf_printk("drop");
+			goto drop;
+
+		case PKT_ACT_PASS:
+		case PKT_ACT_CONTINUE:
+		default:
+			goto pass;
+	}
+
+pass:
+	return (pktt == XDP_PKT) ? XDP_PASS : TC_ACT_UNSPEC;
+drop:
+	return (pktt == XDP_PKT) ? XDP_DROP : TC_ACT_SHOT;
+}
+
 enum chlo_tls_atype {
 	SNI_FOUND,
 	SNI_NOT_FOUND,
@@ -99,21 +132,6 @@ struct ct_value {
 	enum chlo_tls_atype	chlo_state;
 	enum sni_action		sni_action;
 	u8 buf[CT_SEQ_WINSIZE];
-};
-
-enum pkt_type {
-	XDP_PKT,
-	SKB_PKT,
-	CT_PKT
-};
-
-struct pkt {
-	enum pkt_type type;
-	union {
-		struct xdp_md *xdp;
-		struct __sk_buff *skb;
-		struct ct_value *ctv;
-	};
 };
 
 enum lnetwork_type {
@@ -278,5 +296,53 @@ static long reverse_syms_cb(u64 index, void *ctx) {
 #define bpf_printk(...) ;
 
 #define bpf_tt_printk(fmt, args...) ___bpf_pick_printk(args)(fmt, ##args)
+
+#define tail_entry_fun(fn_name)			\
+SEC("xdp")					\
+int xdp_##fn_name(struct xdp_md *xdp) {		\
+	struct pkt pkt = {			\
+		.xdp = xdp,			\
+		.type = XDP_PKT			\
+	};					\
+	return fn_name(pkt);			\
+}						\
+SEC("tc")					\
+int tc_##fn_name(struct __sk_buff *skb) {	\
+	struct pkt pkt = {			\
+		.skb = skb,			\
+		.type = SKB_PKT,		\
+	};					\
+	return fn_name(pkt);			\
+}
+
+
+#define tail_entry_map(fn_name)			\
+struct {					\
+    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);	\
+    __uint(max_entries, 1);			\
+    __uint(key_size, sizeof(__u32));		\
+    __array(values, int (void *));		\
+} fn_name##_map SEC(".maps") = {		\
+    .values = {					\
+        [0] = (void *)&fn_name,			\
+    },						\
+}
+
+#define tail_entry_call(fn_name)					\
+static __inline int call_##fn_name(struct pkt pkt) {			\
+	if (pkt.type == XDP_PKT) {					\
+		bpf_tail_call_static(pkt.xdp, &xdp_##fn_name##_map, 0);	\
+	} else if (pkt.type == SKB_PKT) {				\
+		bpf_tail_call_static(pkt.skb, &tc_##fn_name##_map, 0);	\
+	} else { return -1; }						\
+	return 0;							\
+}
+
+
+#define tail_entries(fn_name)			\
+tail_entry_fun(fn_name)				\
+tail_entry_map(xdp_##fn_name);			\
+tail_entry_map(tc_##fn_name);			\
+tail_entry_call(fn_name);
 
 #endif /* TYPES_H */
