@@ -43,6 +43,14 @@ struct Command {
     /// Same as --postgres, but reads connection string from POSTGRES_URI environment variable
     #[arg(long = "postgres_env")]
     postgres_toggler: bool,
+
+    /// Disable xdp
+    #[arg(long="no-xdp")]
+    no_xdp: bool,
+
+    /// Disable tc
+    #[arg(long="no-tc")]
+    no_tc: bool,
 }
 
 #[tokio::main]
@@ -111,19 +119,23 @@ async fn main() -> Result<()> {
         skel.sni_lpm_add_entry(domain, sni_action::SNI_BLOCK)?;
     }
 
-    for tc_controller in &tc_controllers {
-        let tcc = tc_controller.0.as_ref().unwrap();
-        let tc_iface = &tc_controller.1;
+    if !opts.no_tc {
+        for tc_controller in &tc_controllers {
+            let tcc = tc_controller.0.as_ref().unwrap();
+            let tc_iface = &tc_controller.1;
 
-        println!("Attaching TC hook to {tc_iface}");
-        tcc.attach()?;
+            println!("Attaching TC hook to {tc_iface}");
+            tcc.attach()?;
+        }
     }
-    for xdp_prog in &xdp_progs {
-        let xdpp = xdp_prog.0.as_ref().unwrap();
-        let xdp_iface = &xdp_prog.1;
+    if !opts.no_xdp {
+        for xdp_prog in &xdp_progs {
+            let xdpp = xdp_prog.0.as_ref().unwrap();
+            let xdp_iface = &xdp_prog.1;
 
-        println!("Attaching XDP hook to {xdp_iface}");
-        xdpp.attach()?;
+            println!("Attaching XDP hook to {xdp_iface}");
+            xdpp.attach()?;
+        }
     }
 
     let _logging_thr = init_sni_logging(SniLoggingCtx {
