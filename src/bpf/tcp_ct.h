@@ -22,12 +22,6 @@
 #include "types.h"
 #include "tls.h"
 
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 10000);
-	__type(key, struct ct_entry);
-	__type(value, struct ct_value);
-} ct_map SEC(".maps");
 
 /**
  * Secure storage for ct_entry preventing any stack overflows
@@ -341,7 +335,7 @@ step_out:
 	return ret;
 }
 
-static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
+static __inline enum pkt_action tcp_process_conntrack(struct pkt pkt, struct packet_data *pktd)
 {	
 	int ret;
 	enum pkt_action act;
@@ -396,15 +390,7 @@ static __inline enum pkt_action tcp_process_conntrack(struct packet_data *pktd)
 		//ctv update
 		tcp_ctv_update(pktd, ctv);
 
-		struct pkt pkt = {
-			.type = CT_PKT,
-			.ctv = ctv
-		};
-		act = process_tls(pkt, pktd, 0);
-		if (act == PKT_ACT_DROP) {
-			ctv->fast_action = act;
-		}
-
+		act = tail_tls_process(pkt, &cte);
 		return act;
 
 		bpf_printk("seq difference %u", seq_diff);

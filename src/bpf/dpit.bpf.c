@@ -19,84 +19,6 @@
 #include "types.h"
 #include "tcp.h"
 
-#define ETH_P_IPV6  0x86DD      /* IPv6 over bluebook       */
-#define ETH_P_IP    0x0800      /* Internet Protocol packet */
-
-#define IPPROTO_TCP 0x06
-#define IPPROTO_UDP 0x11
-
-static __inline int get_network_data(
-	struct pkt pkt, 
-	struct lnetwork_data *lnd
-) {
-	int ret;
-	u16 h_proto;
-
-	{
-		struct ethhdr eth;
-		get_val(struct ethhdr, pkt, 0, eth, ret);
-		if (ret) {
-			return -1;
-		}
-		h_proto = bpf_ntohs(eth.h_proto);
-	}
-
-	if (h_proto == ETH_P_IP) {
-		lnd->protocol_type = IPV4;
-		get_val(struct iphdr, pkt, sizeof(struct ethhdr), lnd->iph, ret);
-		if (ret) {
-			return -1;
-		}
-		lnd->transport_offset = sizeof(struct ethhdr) + sizeof(struct iphdr);
-		lnd->transport_protocol = lnd->iph.protocol;
-	} else if (h_proto == ETH_P_IPV6) {
-		lnd->protocol_type = IPV6;
-		get_val(struct ipv6hdr, pkt, sizeof(struct ethhdr), lnd->ip6h, ret);
-		if (ret) {
-			return -1;
-		}
-		lnd->transport_offset = sizeof(struct ethhdr) + sizeof(struct ipv6hdr);
-		lnd->transport_protocol = lnd->ip6h.nexthdr;
-	} else {
-		bpf_printk("Unknown network protocol %04x", h_proto);
-		return -1;
-	}
-
-	return 0;
-}
-
-static __inline int get_transport_data(
-	struct pkt pkt, 
-	const struct lnetwork_data *lnd, 
-	struct ltransport_data *ltd
-) {
-	int ret;
-
-	if (lnd->transport_protocol == IPPROTO_TCP) {
-		ltd->transport_type = TCP;
-		get_val(struct tcphdr, pkt, lnd->transport_offset, ltd->tcph, ret);
-		if (ret) {
-			return -1;
-		}
-		int doff = ltd->tcph.doff * 4;
-		ltd->payload_offset = lnd->transport_offset + doff;
-	} else if (lnd->transport_protocol == IPPROTO_UDP) {
-		ltd->transport_type = UDP;
-		get_val(struct udphdr, pkt, lnd->transport_offset, ltd->udph, ret);
-		if (ret) {
-			return -1;
-		}
-		ltd->payload_offset = lnd->transport_offset + sizeof(struct udphdr);
-	} else {
-		bpf_printk("Unknown transport protocol %d", lnd->transport_protocol);
-		return -1;
-	}
-
-	return 0;
-}
-
-
-
 static __inline enum pkt_action handle_pkt(struct pkt pkt) 
 {
 	int ret;
@@ -117,8 +39,14 @@ static __inline enum pkt_action handle_pkt(struct pkt pkt)
 		return PKT_ACT_PASS;
 	}
 
+	ret = bpf_map_update_elem(&pktd_storage, &PCP_KEY, &pktd, BPF_ANY);
+	if (ret) {
+		// Should be unreachable
+		return PKT_ACT_CONTINUE;
+	}
+
 	if (pktd.ltd.transport_type == TCP) {
-		act = process_tcp(&pktd, pkt);
+		act = process_tcp(pkt);
 	}
 	
 	return act;

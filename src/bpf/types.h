@@ -25,6 +25,15 @@
 
 #define __inline inline __attribute__((always_inline))
 
+#undef bpf_printk
+#define bpf_printk(...) ;
+
+#define bpf_tt_printk(fmt, args...) ___bpf_pick_printk(args)(fmt, ##args)
+#define bpf_e_printk bpf_tt_printk
+
+#define panic while(1) { }
+#define unreachable panic
+
 #define TC_ACT_UNSPEC	(-1)
 #define TC_ACT_SHOT	2
 
@@ -134,6 +143,32 @@ struct ct_value {
 	u8 buf[CT_SEQ_WINSIZE];
 };
 
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 10000);
+	__type(key, struct ct_entry);
+	__type(value, struct ct_value);
+} ct_map SEC(".maps");
+
+// dtype, struct pkt pkt, int offset, dtype *dst
+#define get_val(dtype, pkt, offset, dst, ret)		\
+if (pkt.type == SKB_PKT) {				\
+	ret = bpf_skb_load_bytes(pkt.skb, offset,	\
+		&dst, sizeof(dst));			\
+} else if (pkt.type == XDP_PKT) {			\
+	ret = bpf_xdp_load_bytes(pkt.xdp, offset,	\
+		&dst, sizeof(dst));			\
+} else if (pkt.type == CT_PKT) {			\
+	if (offset + sizeof(dtype) > sizeof(pkt.ctv->buf)) {	\
+		ret = -1;					\
+	} else {						\
+		dst = *(dtype *)(pkt.ctv->buf + offset);	\
+		ret = 0;					\
+	}							\
+} else {							\
+	unreachable;						\
+}
+
 enum lnetwork_type {
 	IPV4,
 	IPV6
@@ -163,49 +198,113 @@ struct ltransport_data {
 	};
 };
 
+#define ETH_P_IPV6  0x86DD      /* IPv6 over bluebook       */
+#define ETH_P_IP    0x0800      /* Internet Protocol packet */
+
+#define IPPROTO_TCP 0x06
+#define IPPROTO_UDP 0x11
+
+static __inline int get_network_data(
+	struct pkt pkt,
+	struct lnetwork_data *lnd
+) {
+	int ret;
+	u16 h_proto;
+
+	{
+		struct ethhdr eth;
+		get_val(struct ethhdr, pkt, 0, eth, ret);
+		if (ret) {
+			return -1;
+		}
+		h_proto = bpf_ntohs(eth.h_proto);
+	}
+
+	if (h_proto == ETH_P_IP) {
+		lnd->protocol_type = IPV4;
+		get_val(struct iphdr, pkt, sizeof(struct ethhdr), lnd->iph, ret);
+		if (ret) {
+			return -1;
+		}
+		lnd->transport_offset = sizeof(struct ethhdr) + sizeof(struct iphdr);
+		lnd->transport_protocol = lnd->iph.protocol;
+	} else if (h_proto == ETH_P_IPV6) {
+		lnd->protocol_type = IPV6;
+		get_val(struct ipv6hdr, pkt, sizeof(struct ethhdr), lnd->ip6h, ret);
+		if (ret) {
+			return -1;
+		}
+		lnd->transport_offset = sizeof(struct ethhdr) + sizeof(struct ipv6hdr);
+		lnd->transport_protocol = lnd->ip6h.nexthdr;
+	} else {
+		bpf_printk("Unknown network protocol %04x", h_proto);
+		return -1;
+	}
+
+	return 0;
+}
+
+static __inline int get_transport_data(
+	struct pkt pkt,
+	const struct lnetwork_data *lnd,
+	struct ltransport_data *ltd
+) {
+	int ret;
+
+	if (lnd->transport_protocol == IPPROTO_TCP) {
+		ltd->transport_type = TCP;
+		get_val(struct tcphdr, pkt, lnd->transport_offset, ltd->tcph, ret);
+		if (ret) {
+			return -1;
+		}
+		int doff = ltd->tcph.doff * 4;
+		ltd->payload_offset = lnd->transport_offset + doff;
+	} else if (lnd->transport_protocol == IPPROTO_UDP) {
+		ltd->transport_type = UDP;
+		get_val(struct udphdr, pkt, lnd->transport_offset, ltd->udph, ret);
+		if (ret) {
+			return -1;
+		}
+		ltd->payload_offset = lnd->transport_offset + sizeof(struct udphdr);
+	} else {
+		bpf_printk("Unknown transport protocol %d", lnd->transport_protocol);
+		return -1;
+	}
+
+	return 0;
+}
+
 struct packet_data {
 	struct lnetwork_data lnd;
 	struct ltransport_data ltd;
 	struct pkt pkt;
 };
 
-#define panic while(1) { }
-#define unreachable panic
+/**
+ * Used to transfer state between tail calls
+ */
+struct {
+        __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+        __type(key, u32);
+        __type(value, struct packet_data);
+        __uint(max_entries, 1);
+} pktd_storage SEC(".maps");
 
+/**
+ * May be (and inteneded to) used across tail calls
+ */
+static __inline int get_pktd(struct pkt pkt, struct packet_data *pktd) {
+	struct packet_data *ppktd = bpf_map_lookup_elem(&pktd_storage, &PCP_KEY);
+	if (ppktd == NULL) {
+		// should be unreachable
+		bpf_e_printk("FATAL: Cannot get state packet data");
+		return -1;
+	}
+	*pktd = *ppktd;
+	pktd->pkt = pkt;
 
-// dtype, struct pkt pkt, int offset, dtype *dst
-#define get_val(dtype, pkt, offset, dst, ret)		\
-if (pkt.type == SKB_PKT) {				\
-	ret = bpf_skb_load_bytes(pkt.skb, offset,	\
-		&dst, sizeof(dst));			\
-} else if (pkt.type == XDP_PKT) {			\
-	ret = bpf_xdp_load_bytes(pkt.xdp, offset,	\
-		&dst, sizeof(dst));			\
-} else if (pkt.type == CT_PKT) {			\
-	if (offset + sizeof(dtype) > sizeof(pkt.ctv->buf)) {	\
-		ret = -1;					\
-	} else {						\
-		dst = *(dtype *)(pkt.ctv->buf + offset);	\
-		ret = 0;					\
-	}							\
-} else {							\
-	unreachable;						\
+	return 0;
 }
-
-
-
-	// void *data = (void *)pkt.xdp->data;		\
-	// void *data_end = (void *)pkt.xdp->data_end;	\
-	// 						\
-	// void *tdata = data + offset;			\
-	// if (tdata + sizeof(dtype) > data_end) {		\
-	// 	ret = -1;				\
-	// } else {					\
-	// 	dst = *(dtype *)tdata;			\
-	// 	ret = 0;				\
-	// }						\
-	//
-
 
 /**
  * Used for more advanced parsing of the pkt buffer.
@@ -291,11 +390,6 @@ static long reverse_syms_cb(u64 index, void *ctx) {
 
 	return 0;
 }
-
-#undef bpf_printk
-#define bpf_printk(...) ;
-
-#define bpf_tt_printk(fmt, args...) ___bpf_pick_printk(args)(fmt, ##args)
 
 #define tail_entry_fun(fn_name)			\
 SEC("xdp")					\

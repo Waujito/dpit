@@ -564,13 +564,13 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 
 	struct sni_tls_anres chres = analyze_tls_record(pkt, offset);
 	if (chres.type == SNI_FOUND) {
-		bpf_printk("Found SNI in TLS in off %d and len %d", chres.sni_offset, chres.sni_length);
+		bpf_tt_printk("Found SNI in TLS in off %d and len %d", chres.sni_offset, chres.sni_length);
 		u32 sni_length = chres.sni_length;
 
 		sni_tbuf = bpf_map_lookup_elem(&sni_buf_map, &PCP_KEY);
 		if (sni_tbuf == NULL) {
 			// should be unreachable
-			bpf_printk("FATAL: Cannot get value storage");
+			bpf_tt_printk("FATAL: Cannot get value storage");
 			return PKT_ACT_CONTINUE;
 		}
 
@@ -669,11 +669,10 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 	}
 
 	if (send) {
-		struct tls_sni_signaling *tlssig = 
-				bpf_map_lookup_elem(&tls_sni_signaling_storage, &PCP_KEY);
+		struct tls_sni_signaling *tlssig = bpf_map_lookup_elem(&tls_sni_signaling_storage, &PCP_KEY);
 		if (tlssig == NULL) {
 			// should be unreachable
-			bpf_printk("FATAL: Cannot get perf signaling storage");
+			bpf_e_printk("FATAL: Cannot get perf signaling storage");
 			goto return_verdict;
 		}
 
@@ -696,8 +695,6 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 			ctx = pktd->pkt.xdp;
 		} else if (pktd->pkt.type == SKB_PKT) {
 			ctx = pktd->pkt.skb;
-		} else {
-			unreachable;
 		}
 
 		ret = bpf_perf_event_output(ctx, 
@@ -705,7 +702,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 		 tlssig, sizeof(struct tls_sni_signaling));
 
 		if (ret) {
-			bpf_tt_printk("PERF SNI event logging failure %d", ret);
+			bpf_e_printk("PERF SNI event logging failure %d", ret);
 		} else {
 			bpf_tt_printk("PERF SNI logged");
 		}
@@ -722,5 +719,64 @@ return_verdict:
 		return PKT_ACT_PASS;
 	}
 }
+
+/**
+ * Used to transfer state between tail calls
+ */
+struct {
+        __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+        __type(key, u32);
+        __type(value, struct ct_entry);
+        __uint(max_entries, 1);
+} cte_storage SEC(".maps");
+
+static __inline int tail_cb_tls_process(struct pkt pkt){
+	struct packet_data pktd;
+	if (get_pktd(pkt, &pktd)) {
+		return -1;
+	}
+
+	struct ct_entry *ctep = bpf_map_lookup_elem(&cte_storage, &PCP_KEY);
+	if (ctep == NULL) {
+		// should be unreachable
+		bpf_e_printk("FATAL tail_tls: Cannot get state ct_entry");
+		return -1;
+	}
+	struct ct_entry cte = *ctep;
+	struct ct_value *ctv = bpf_map_lookup_elem(&ct_map, &cte);	
+
+	if (ctv == NULL) {
+		bpf_e_printk("FATAL tail_tls: Cannot exchange ct_entry for ct_value");
+		return -1;
+	}
+
+	enum pkt_action act;
+
+	struct pkt ctv_pkt = {
+		.type = CT_PKT,
+		.ctv = ctv
+	};
+	act = process_tls(ctv_pkt, &pktd, 0);
+	if (act == PKT_ACT_DROP) {
+		ctv->fast_action = act;
+	}
+
+	return get_return_code(act, pkt.type);
+}
+
+tail_entries(tail_cb_tls_process);
+
+static __inline enum pkt_action tail_tls_process(struct pkt pkt, struct ct_entry *cte) {
+	int ret;
+	ret = bpf_map_update_elem(&cte_storage, &PCP_KEY, cte, BPF_ANY);
+	if (ret) {
+		// Should be unreachable
+		return PKT_ACT_CONTINUE;
+	}
+	ret = call_tail_cb_tls_process(pkt);
+	
+	return PKT_ACT_CONTINUE;
+}
+
 
 #endif /* TLS_H */
