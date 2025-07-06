@@ -24,7 +24,7 @@
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 1024);
+	__uint(max_entries, 10000);
 	__type(key, struct ct_entry);
 	__type(value, struct ct_value);
 } ct_map SEC(".maps");
