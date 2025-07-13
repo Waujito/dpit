@@ -20,7 +20,6 @@
 #define TCP_H
 
 #include "types.h"
-#include "tls.h"
 #include "tcp_ct.h"
 
 static __inline int tail_tcppct(struct pkt pkt){	
@@ -34,9 +33,11 @@ static __inline int tail_tcppct(struct pkt pkt){
 		return -1;
 	}
 
-	enum pkt_action act = tcp_process_conntrack(pkt, &pktd);
+	struct dpit_action act = tcp_process_conntrack(pkt, &pktd);
 
-	return get_return_code(act, pkt.type);
+	enum pkt_action pact = get_pkt_action(act);
+
+	return get_return_code(pact, pkt.type);
 }
 
 tail_entries(tail_tcppct);

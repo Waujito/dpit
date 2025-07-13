@@ -72,8 +72,29 @@ struct ct_entry {
 	struct transport_entry tpe;
 };
 
+enum dpit_action_type {
+	DPIT_ACT_APPROVE,
+	DPIT_ACT_BLOCK,
+	DPIT_ACT_BLOCK_OVERWRITTEN,
+	DPIT_ACT_THROTTLE,
+	DPIT_ACT_CONTINUE,
+};
 
+/**
+ * DPIT-regulated action type. typically, per-connection
+ */
+struct dpit_action {
+	enum dpit_action_type type;
 
+	/**
+	 * A throttling percent from 0 to 100 (larger is more throttling)
+	 */
+	int throttling_percent;
+};
+
+/**
+ * Action per-packet
+ */
 enum pkt_action {
 	PKT_ACT_PASS,
 	PKT_ACT_DROP,
@@ -95,6 +116,24 @@ struct pkt {
 	};
 };
 
+static __inline enum pkt_action get_pkt_action(struct dpit_action act) {
+	switch (act.type) {
+		case DPIT_ACT_APPROVE:
+			return PKT_ACT_PASS;
+		case DPIT_ACT_BLOCK:
+		case DPIT_ACT_BLOCK_OVERWRITTEN:
+			return PKT_ACT_DROP;
+		case DPIT_ACT_THROTTLE: {
+			u32 randn = bpf_get_prandom_u32();
+			// randn [0; 99]; throttling_percent [0; 100]
+			randn %= 100;
+			return (randn < act.throttling_percent) ? PKT_ACT_DROP : PKT_ACT_PASS;
+		}
+		case DPIT_ACT_CONTINUE:
+		default:
+			return PKT_ACT_CONTINUE;
+	}
+}
 static __inline int get_return_code(enum pkt_action act, enum pkt_type pktt) {
 	switch (act) {
 		case PKT_ACT_DROP:
@@ -120,12 +159,6 @@ enum chlo_tls_atype {
 	MEM_ERROR,
 };
 
-enum sni_action {
-	SNI_APPROVE,
-	SNI_BLOCK,
-	SNI_BLOCK_OVERWRITTEN,
-};
-
 #define CT_FLAG_TLS_HANDSHAKE	(1 << 0)
 #define CT_FLAG_TLS_VMAJOR	(1 << 1)
 #define CT_FLAG_TLS_CHLO	(1 << 2)
@@ -135,11 +168,11 @@ enum sni_action {
 struct ct_value {
 	u32 seq;
 	// Used for early exit if the connection is approved/dropped
-	enum pkt_action fast_action;
+	struct dpit_action fast_action;
 	// Additional information encoded in bitmask CT_FLAG_
 	u32 flags;
 	enum chlo_tls_atype	chlo_state;
-	enum sni_action		sni_action;
+	struct dpit_action	sni_action;
 	u8 buf[CT_SEQ_WINSIZE];
 };
 

@@ -206,10 +206,13 @@ static __inline struct ct_entry build_ct_entry(struct packet_data *pktd) {
  * Initializes an empty ct_value. Note, that you will need to set seq manually
  */
 static __inline void initialize_ct_value(struct ct_value *ctv) {
+	struct dpit_action ret_act = {0};
+	ret_act.type = DPIT_ACT_CONTINUE;
 	ctv->seq = 0;
-	ctv->fast_action = PKT_ACT_CONTINUE;
+	ctv->fast_action = ret_act;
 	ctv->chlo_state = MEM_ERROR;
-	ctv->sni_action = SNI_APPROVE;
+	ret_act.type = DPIT_ACT_APPROVE;
+	ctv->sni_action = ret_act;
 	for (int i = 0; i < CT_SEQ_WINSIZE; i++) {
 		// Clang replaces this with memset by default
 		asm volatile(
@@ -335,10 +338,11 @@ step_out:
 	return ret;
 }
 
-static __inline enum pkt_action tcp_process_conntrack(struct pkt pkt, struct packet_data *pktd)
+static __inline struct dpit_action tcp_process_conntrack(struct pkt pkt, struct packet_data *pktd)
 {	
 	int ret;
-	enum pkt_action act;
+	struct dpit_action act = {0};
+	act.type = DPIT_ACT_CONTINUE;
 
 	struct ct_entry cte = build_ct_entry(pktd);
 
@@ -356,7 +360,7 @@ static __inline enum pkt_action tcp_process_conntrack(struct pkt pkt, struct pac
 		if (ctv == NULL) {
 			// should be unreachable
 			bpf_printk("FATAL: Cannot get value storage");
-			return PKT_ACT_CONTINUE;
+			return act;
 		}
 	
 		initialize_ct_value(ctv);
@@ -379,10 +383,10 @@ static __inline enum pkt_action tcp_process_conntrack(struct pkt pkt, struct pac
 		}
 
 		if (ctv == NULL) {
-			return PKT_ACT_CONTINUE;
+			return act;
 		}	
 
-		if (ctv->fast_action != PKT_ACT_CONTINUE) {
+		if (ctv->fast_action.type != DPIT_ACT_CONTINUE) {
 			bpf_printk("Fast action %d", ctv->fast_action);
 			return ctv->fast_action;
 		}
@@ -397,7 +401,7 @@ static __inline enum pkt_action tcp_process_conntrack(struct pkt pkt, struct pac
 	}
 
 
-	return PKT_ACT_CONTINUE;
+	return act;
 }
 
 #endif /* TCP_CT_H */

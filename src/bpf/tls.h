@@ -151,7 +151,7 @@ static __inline int exchange_tls_flags(struct packet_data *pktd, struct ct_value
 struct {
         __uint(type, BPF_MAP_TYPE_LPM_TRIE);
         __type(key, struct sni_buf);
-        __type(value, enum sni_action);
+        __type(value, struct dpit_action);
         __uint(map_flags, BPF_F_NO_PREALLOC);
         __uint(max_entries, 255);
 } sni_lpm_map SEC(".maps");
@@ -537,7 +537,7 @@ struct tls_sni_signaling {
 	struct ltransport_data ltd;
 	enum chlo_tls_atype sni_type;
 	struct sni_buf sni_data;
-	enum sni_action act;
+	struct dpit_action act;
 };
 
 struct {
@@ -556,10 +556,12 @@ struct {
         __uint(max_entries, 1);
 } tls_sni_signaling_storage SEC(".maps");
 
-static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *pktd, u32 offset) {
+static __inline struct dpit_action process_tls(struct pkt pkt, struct packet_data *pktd, u32 offset) {
 	int ret;
-	enum sni_action act;
-	act = SNI_APPROVE;
+	struct dpit_action ret_act = {0};
+	ret_act.type = DPIT_ACT_CONTINUE;
+	struct dpit_action act = {0};
+	act.type = DPIT_ACT_APPROVE;
 	struct sni_buf *sni_tbuf = NULL;
 
 	struct sni_tls_anres chres = analyze_tls_record(pkt, offset);
@@ -571,7 +573,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 		if (sni_tbuf == NULL) {
 			// should be unreachable
 			bpf_tt_printk("FATAL: Cannot get value storage");
-			return PKT_ACT_CONTINUE;
+			return ret_act;
 		}
 
 		char *sni_buf = (char *)(sni_tbuf->data);
@@ -580,7 +582,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 		// (see the description of sni_lpm_map)
 		if (sni_length > SNI_BUF_LEN - 2) {
 			bpf_printk("SNI is too large");
-			return PKT_ACT_CONTINUE;
+			return act;
 		}
 
 		for (int i = 0; i < sni_length; i++) {
@@ -588,7 +590,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 
 			if (ret) {
 				bpf_printk("sni copy error");
-				return PKT_ACT_CONTINUE;
+				return ret_act;
 			}
 		}
 		// point-terminator
@@ -606,12 +608,12 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 		// bpf_loop increases insns cap
 		ret = bpf_loop(sni_length, reverse_syms_cb, &rsctx, 0);
 		if (ret < 0) {
-			return PKT_ACT_CONTINUE;
+			return ret_act;
 		}
 
 
 		sni_tbuf->prefixlen = (sni_length + 1) * 8;
-		enum sni_action *actp = bpf_map_lookup_elem(&sni_lpm_map, sni_tbuf);
+		struct dpit_action *actp = bpf_map_lookup_elem(&sni_lpm_map, sni_tbuf);
 		if (actp == NULL) {
 			bpf_printk("Action not found");
 		} else {
@@ -639,15 +641,15 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 				(flags & CT_FLAG_TLS_CHLO) == 
 					CT_FLAG_TLS_CHLO) {
 				bpf_tt_printk("TLS CHLO MESSAGE IS OVERWRITTEN");
-				act = SNI_BLOCK_OVERWRITTEN;
+				act.type = DPIT_ACT_BLOCK_OVERWRITTEN;
 			}
 		}
 	}
 
 	if (	chres.type != SNI_FOUND && 
 		chres.type != SNI_NOT_FOUND &&
-		act == SNI_APPROVE) {
-		return PKT_ACT_CONTINUE;
+		act.type == DPIT_ACT_APPROVE) {
+		return ret_act;
 	}
 
 	int send = 1;
@@ -659,7 +661,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 
 		if (!send) {
 			if (	pkt.ctv->chlo_state != chres.type ||
-				pkt.ctv->sni_action != act) {
+				pkt.ctv->sni_action.type != act.type) {
 				send = 1;
 			}
 		}
@@ -685,7 +687,7 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 			tlssig->sni_data = *sni_tbuf;
 			tlssig->sni_data.prefixlen = chres.sni_length;
 
-			if (act == SNI_BLOCK) {
+			if (act.type == DPIT_ACT_BLOCK) {
 				bpf_tt_printk("Blocked SNI %s", sni_tbuf->data);
 			}
 		}
@@ -713,10 +715,15 @@ static __inline enum pkt_action process_tls(struct pkt pkt, struct packet_data *
 	}
 
 return_verdict:
-	if (act == SNI_BLOCK || act == SNI_BLOCK_OVERWRITTEN) {
-		return PKT_ACT_DROP;
+	if (
+		act.type == DPIT_ACT_BLOCK || 
+		act.type == DPIT_ACT_BLOCK_OVERWRITTEN ||
+		act.type == DPIT_ACT_THROTTLE
+	) {
+		return act;
 	} else {
-		return PKT_ACT_PASS;
+		ret_act.type = DPIT_ACT_APPROVE;
+		return ret_act;
 	}
 }
 
@@ -750,32 +757,36 @@ static __inline int tail_cb_tls_process(struct pkt pkt){
 		return -1;
 	}
 
-	enum pkt_action act;
-
 	struct pkt ctv_pkt = {
 		.type = CT_PKT,
 		.ctv = ctv
 	};
-	act = process_tls(ctv_pkt, &pktd, 0);
-	if (act == PKT_ACT_DROP) {
+	struct dpit_action act = process_tls(ctv_pkt, &pktd, 0);
+	if (	act.type == DPIT_ACT_BLOCK || 
+		act.type == DPIT_ACT_BLOCK_OVERWRITTEN || 
+		act.type == DPIT_ACT_THROTTLE ){
 		ctv->fast_action = act;
 	}
+	enum pkt_action pact = get_pkt_action(act);
 
-	return get_return_code(act, pkt.type);
+	return get_return_code(pact, pkt.type);
 }
 
 tail_entries(tail_cb_tls_process);
 
-static __inline enum pkt_action tail_tls_process(struct pkt pkt, struct ct_entry *cte) {
+static __inline struct dpit_action tail_tls_process(struct pkt pkt, struct ct_entry *cte) {
 	int ret;
+	struct dpit_action act = {
+		.type = DPIT_ACT_CONTINUE
+	};
 	ret = bpf_map_update_elem(&cte_storage, &PCP_KEY, cte, BPF_ANY);
 	if (ret) {
 		// Should be unreachable
-		return PKT_ACT_CONTINUE;
+		return act;
 	}
 	ret = call_tail_cb_tls_process(pkt);
 	
-	return PKT_ACT_CONTINUE;
+	return act;
 }
 
 

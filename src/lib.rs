@@ -8,7 +8,7 @@ pub mod postgres_logger;
 pub mod sni_logging_handle;
 
 use anyhow::{anyhow, Context, Result};
-use ebpf_prog::{types::sni_action, DpitSkel};
+use ebpf_prog::{types::dpit_action, DpitSkel};
 use libbpf_rs::{
     skel::{OpenSkel, SkelBuilder},
     MapCore, MapFlags, OpenObject, TcHook, Xdp, XdpFlags, TC_EGRESS,
@@ -21,7 +21,7 @@ use std::{
 };
 
 pub trait DpitSkelLib {
-    fn sni_lpm_add_entry(&self, domain: &str, action: sni_action) -> Result<()>;
+    fn sni_lpm_add_entry(&self, domain: &str, action: dpit_action) -> Result<()>;
 }
 
 impl<'obj> DpitSkelLib for DpitSkel<'obj> {
@@ -31,7 +31,7 @@ impl<'obj> DpitSkelLib for DpitSkel<'obj> {
     ///
     /// This function also implicitly reverses the destination string,
     /// so user should pass the domain normally, like `.google.com`
-    fn sni_lpm_add_entry(&self, domain: &str, action: sni_action) -> Result<()> {
+    fn sni_lpm_add_entry(&self, domain: &str, action: dpit_action) -> Result<()> {
         if domain.len() != domain.len() {
             return Err(anyhow!(
                 "The domain MUST NOT contain Unicode. Use normal form, in ASCII"
@@ -57,8 +57,8 @@ impl<'obj> DpitSkelLib for DpitSkel<'obj> {
         let size = mem::size_of::<ebpf_prog::types::sni_buf>();
         let key = unsafe { std::slice::from_raw_parts(key, size) };
 
-        let value = &action as *const ebpf_prog::types::sni_action as *const u8;
-        let size = mem::size_of::<ebpf_prog::types::sni_action>();
+        let value = &action as *const ebpf_prog::types::dpit_action as *const u8;
+        let size = mem::size_of::<ebpf_prog::types::dpit_action>();
         let value = unsafe { std::slice::from_raw_parts(value, size) };
         self.maps
             .sni_lpm_map
