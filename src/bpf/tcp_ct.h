@@ -22,7 +22,6 @@
 #include "types.h"
 #include "tls.h"
 
-
 /**
  * Secure storage for ct_entry preventing any stack overflows
  */
@@ -171,38 +170,6 @@ static __inline int copy_ctvs_with_offset(struct cbl_cts cbts) {
 }
 
 /**
- *
- * Builds a ct entry universal for any conntract mechanism.
- * Note, that seq_hash is initialized with raw TCP SEQ,
- * you will need to divide it by window later.
- *
- */
-static __inline struct ct_entry build_ct_entry(struct packet_data *pktd) {
-	struct ct_entry cte = {0};
-	struct ip_entry *ipe = &cte.ipe;
-	struct transport_entry *tpe = &cte.tpe; 
-
-	if (pktd->ltd.transport_type != TCP)
-		unreachable;
-
-	if (pktd->lnd.protocol_type == IPV4) {
-		ipe->ip4saddr = pktd->lnd.iph.saddr;
-		ipe->ip4daddr = pktd->lnd.iph.daddr;
-	} else {
-		ipe->ip6saddr = pktd->lnd.ip6h.saddr;
-		ipe->ip6daddr = pktd->lnd.ip6h.daddr;
-	}
-	
-	u32 seq = bpf_ntohl(pktd->ltd.tcph.seq);
-
-	tpe->sport = bpf_ntohs(pktd->ltd.tcph.source);
-	tpe->dport = bpf_ntohs(pktd->ltd.tcph.dest);
-	tpe->seq_hash = seq;
-
-	return cte;
-}
-
-/**
  * Initializes an empty ct_value. Note, that you will need to set seq manually
  */
 static __inline void initialize_ct_value(struct ct_value *ctv) {
@@ -344,7 +311,11 @@ static __inline struct dpit_action tcp_process_conntrack(struct pkt pkt, struct 
 	struct dpit_action act = {0};
 	act.type = DPIT_ACT_CONTINUE;
 
-	struct ct_entry cte = build_ct_entry(pktd);
+	struct ct_entry cte;
+	ret = build_ct_entry(pktd, &cte);
+	if (ret) {
+		return act;
+	}
 
 	if (pktd->ltd.transport_type != TCP)
 		unreachable;

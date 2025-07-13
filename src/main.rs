@@ -33,6 +33,9 @@ struct Command {
     /// `gle.com` including)
     /// If you want some throttling, pass it after semicolon:
     /// google.com:70 means 70% of packets will be dropped for domain google.com
+    /// Please not that the throttling is bidirectional (for both server and client) unless any
+    /// other constraints is set e.g. disabled xdp or tc, or the server processes traffic only to
+    /// one side
     #[arg(default_value = "", short = 'd', long = "block-domains")]
     block_domains: String,
 

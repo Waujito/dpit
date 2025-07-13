@@ -21,6 +21,7 @@
 
 #include "types.h"
 #include "tcp_ct.h"
+#include "tail_act.h"
 
 static __inline int tail_tcppct(struct pkt pkt){	
 	struct packet_data pktd;
@@ -33,7 +34,16 @@ static __inline int tail_tcppct(struct pkt pkt){
 		return -1;
 	}
 
-	struct dpit_action act = tcp_process_conntrack(pkt, &pktd);
+
+	struct dpit_action act = {0};
+	act = tcp_fct_lookup_client(&pktd);
+	if (act.type == DPIT_ACT_CONTINUE) {
+		act = tcp_fct_lookup_server(&pktd);
+	}
+
+	if (act.type == DPIT_ACT_CONTINUE) {
+		act = tcp_process_conntrack(pkt, &pktd);
+	}
 
 	enum pkt_action pact = get_pkt_action(act);
 

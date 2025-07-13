@@ -20,6 +20,7 @@
 #define TLS_H
 
 #include "types.h"
+#include "tail_act.h"
 
 #define TLS_CONTENT_TYPE_HANDSHAKE 0x16
 #define TLS_HANDSHAKE_TYPE_CLIENT_HELLO 0x01
@@ -767,6 +768,9 @@ static __inline int tail_cb_tls_process(struct pkt pkt){
 		act.type == DPIT_ACT_THROTTLE ){
 		ctv->fast_action = act;
 	}
+
+	tail_acttl(pkt, act);
+
 	enum pkt_action pact = get_pkt_action(act);
 
 	return get_return_code(pact, pkt.type);

@@ -424,6 +424,74 @@ static long reverse_syms_cb(u64 index, void *ctx) {
 	return 0;
 }
 
+/**
+ *
+ * Builds a ct entry universal for any conntract mechanism.
+ * Note, that seq_hash is initialized with raw TCP SEQ,
+ * you will need to divide it by window later.
+ *
+ */
+static __inline int build_ct_entry(struct packet_data *pktd, struct ct_entry *ctep) {
+	struct ct_entry cte = {0};
+	struct ip_entry *ipe = &cte.ipe;
+	struct transport_entry *tpe = &cte.tpe; 
+
+	if (pktd->ltd.transport_type != TCP)
+		return -1;
+
+	if (pktd->lnd.protocol_type == IPV4) {
+		ipe->ip4saddr = pktd->lnd.iph.saddr;
+		ipe->ip4daddr = pktd->lnd.iph.daddr;
+	} else {
+		ipe->ip6saddr = pktd->lnd.ip6h.saddr;
+		ipe->ip6daddr = pktd->lnd.ip6h.daddr;
+	}
+	
+	u32 seq = bpf_ntohl(pktd->ltd.tcph.seq);
+
+	tpe->sport = bpf_ntohs(pktd->ltd.tcph.source);
+	tpe->dport = bpf_ntohs(pktd->ltd.tcph.dest);
+	tpe->seq_hash = seq;
+
+	*ctep = cte;
+
+	return 0;
+}
+
+/**
+ *
+ * Builds a ct entry universal for any conntract mechanism.
+ * Note, that seq_hash is initialized with raw TCP SEQ,
+ * you will need to divide it by window later.
+ *
+ */
+static __inline int build_server_ct_entry(struct packet_data *pktd, struct ct_entry *ctep) {
+	struct ct_entry cte = {0};
+	struct ip_entry *ipe = &cte.ipe;
+	struct transport_entry *tpe = &cte.tpe; 
+
+	if (pktd->ltd.transport_type != TCP)
+		return -1;
+
+	if (pktd->lnd.protocol_type == IPV4) {
+		ipe->ip4saddr = pktd->lnd.iph.daddr;
+		ipe->ip4daddr = pktd->lnd.iph.saddr;
+	} else {
+		ipe->ip6saddr = pktd->lnd.ip6h.daddr;
+		ipe->ip6daddr = pktd->lnd.ip6h.saddr;
+	}
+	
+	u32 seq = bpf_ntohl(pktd->ltd.tcph.ack_seq);
+
+	tpe->sport = bpf_ntohs(pktd->ltd.tcph.dest);
+	tpe->dport = bpf_ntohs(pktd->ltd.tcph.source);
+	tpe->seq_hash = seq;
+
+	*ctep = cte;
+
+	return 0;
+}
+
 #define tail_entry_fun(fn_name)			\
 SEC("xdp")					\
 int xdp_##fn_name(struct xdp_md *xdp) {		\
