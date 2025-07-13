@@ -3,7 +3,7 @@
 use std::mem::MaybeUninit;
 use std::os::unix::io::AsFd as _;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use ebpf_dpit::{
     ebpf_prog, init_skel,
@@ -31,6 +31,8 @@ struct Command {
     /// if you want to escape miss-matching (like `google.com` will be matched to
     /// `gle.com` by default. If you pass .gle.com, it will map only `*.gle.com`
     /// `gle.com` including)
+    /// If you want some throttling, pass it after semicolon:
+    /// google.com:70 means 70% of packets will be dropped for domain google.com
     #[arg(default_value = "", short = 'd', long = "block-domains")]
     block_domains: String,
 
@@ -115,8 +117,30 @@ async fn main() -> Result<()> {
         }
 
         println!("Register blocking domain {domain}");
+        if domain.contains(":") {
+            let (dmn, percentage) = {
+                let splits: Vec<&str> = domain.split(":").collect();
 
-        skel.sni_lpm_add_entry(domain, dpit_action { r#type: dpit_action_type::DPIT_ACT_BLOCK, throttling_percent: 0 })?;
+                if splits.len() != 2 {
+                    Err(anyhow!("more than 1 semicolon"))
+                } else {
+                    let dmn = splits[0];
+                    let percentage = u32::from_str_radix(splits[1], 10)?;
+                    if percentage > 100 {
+                        return Err(anyhow!("percentage is invalid"))
+                    } else {
+                        Ok((dmn, percentage))
+                    }
+                }
+            }.context("Invalid block_domains list syntax!")?;
+
+            skel.sni_lpm_add_entry(dmn, dpit_action { 
+                r#type: dpit_action_type::DPIT_ACT_THROTTLE, 
+                throttling_percent: percentage as i32 }
+            )?;
+        } else {
+            skel.sni_lpm_add_entry(domain, dpit_action { r#type: dpit_action_type::DPIT_ACT_BLOCK, throttling_percent: 0})?;
+        }
     }
 
     if !opts.no_tc {
