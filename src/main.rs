@@ -3,7 +3,7 @@
 use std::mem::MaybeUninit;
 use std::os::unix::io::AsFd as _;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 
 use ebpf_dpit::{
     ebpf_prog, init_skel,
@@ -50,11 +50,11 @@ struct Command {
     postgres_toggler: bool,
 
     /// Disable xdp
-    #[arg(long="no-xdp")]
+    #[arg(long = "no-xdp")]
     no_xdp: bool,
 
     /// Disable tc
-    #[arg(long="no-tc")]
+    #[arg(long = "no-tc")]
     no_tc: bool,
 }
 
@@ -128,21 +128,31 @@ async fn main() -> Result<()> {
                     Err(anyhow!("more than 1 semicolon"))
                 } else {
                     let dmn = splits[0];
-                    let percentage = u32::from_str_radix(splits[1], 10)?;
+                    let percentage: u32 = splits[1].parse()?;
                     if percentage > 100 {
-                        return Err(anyhow!("percentage is invalid"))
+                        return Err(anyhow!("percentage is invalid"));
                     } else {
                         Ok((dmn, percentage))
                     }
                 }
-            }.context("Invalid block_domains list syntax!")?;
+            }
+            .context("Invalid block_domains list syntax!")?;
 
-            skel.sni_lpm_add_entry(dmn, dpit_action { 
-                r#type: dpit_action_type::DPIT_ACT_THROTTLE, 
-                throttling_percent: percentage as i32 }
+            skel.sni_lpm_add_entry(
+                dmn,
+                dpit_action {
+                    r#type: dpit_action_type::DPIT_ACT_THROTTLE,
+                    throttling_percent: percentage as i32,
+                },
             )?;
         } else {
-            skel.sni_lpm_add_entry(domain, dpit_action { r#type: dpit_action_type::DPIT_ACT_BLOCK, throttling_percent: 0})?;
+            skel.sni_lpm_add_entry(
+                domain,
+                dpit_action {
+                    r#type: dpit_action_type::DPIT_ACT_BLOCK,
+                    throttling_percent: 0,
+                },
+            )?;
         }
     }
 

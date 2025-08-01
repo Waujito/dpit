@@ -144,8 +144,9 @@ fn process_perf_signal(sni_tls_data: &tls_sni_signaling, ctx: &PerfProcessContex
         },
     };
 
-    if act.r#type == dpit_action_type::DPIT_ACT_BLOCK || 
-        act.r#type == dpit_action_type::DPIT_ACT_BLOCK_OVERWRITTEN {
+    if act.r#type == dpit_action_type::DPIT_ACT_BLOCK
+        || act.r#type == dpit_action_type::DPIT_ACT_BLOCK_OVERWRITTEN
+    {
         if let TransportHeader::Tcp(tcph) = &transport_header {
             let _ = send_bi_tcp_rst(&network_header, tcph, ctx);
         }
