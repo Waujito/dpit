@@ -39,7 +39,7 @@
 
 #define CT_SEQ_WINSIZE 5000
 
-const u32 RAWSOCKET_MARK = 1 << 15;
+const u32 RAWSOCKET_MARK = 1 << 19;
 
 // This key may be used for percpu array representing single buffer.
 static const u32 PCP_KEY = 0;

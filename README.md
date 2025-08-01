@@ -14,6 +14,8 @@ You can observe the logs of eBPF program with
 sudo cat /sys/kernel/debug/tracing/trace_pipe
 ```
 
+Note, that here is the way to skip the packet processing. It works only for tc and relies on packet mark. The mark may be set by a (raw)socket or with netfilter rules. The mark is also used internally for RST signals handling. The mark is constant and set to 2^19. It may be changed directly in the source code (bpf/types.h). The mark is matched via bitwise_and operation between packet mark and 2^19.
+
 Note, that this command produces the logs in real time, you don't want to restart it each time for update.
 
 The project has support for logging to PostgreSQL. It logs every single connection to any server with TLS. Not only dropped domains, but all. 
